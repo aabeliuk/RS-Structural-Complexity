@@ -429,72 +429,47 @@ def compute_difficult_ratings(df, dataset_name, force_recompute=False):
     print(f"    Global test: {len(global_test_df):,} ratings")
 
     # Create partitions
-    print(f"    Creating {CONFIG['n_partitions']} partitions...")
     all_indices = global_train_df.index.to_numpy()
     shuffled_indices = np.random.permutation(all_indices)
     index_partitions = np.array_split(shuffled_indices, CONFIG['n_partitions'])
-    print(f"    Partitions created")
 
     # Convert to sparse matrix
-    print(f"    Converting to sparse matrix...")
-    import sys
-    sys.stdout.flush()
     df_random = global_train_df.copy()
     M, user_map, item_map = convert_to_sparse_matrix(global_train_df)
-    print(f"    Converting to float32...")
-    sys.stdout.flush()
     M = M.astype('float32')
-    print(f"    Sparse matrix ready")
 
     # Adjust n_components if needed
     n_components = min(CONFIG['n_components'], int(min(M.shape) / 4))
     print(f"    Using {n_components} SVD components")
-    print(f"    Matrix shape: {M.shape}, sparsity: {M.nnz / (M.shape[0] * M.shape[1]):.6f}")
 
     # Compute perturbation impact
-    print(f"    Initializing perturbation analysis...")
     squared_errors = {}
 
-    print(f"    Starting partition loop ({CONFIG['n_partitions']} partitions)...")
-    import sys
-    sys.stdout.flush()
-
     for partition_idx, indices in enumerate(index_partitions, 1):
-        print(f"    Processing partition {partition_idx}/{CONFIG['n_partitions']}...")
-        print(f"      Permuting ratings...", end=" ")
+        print(f"    Processing partition {partition_idx}/{CONFIG['n_partitions']}...", end=" ")
 
         # Permute ratings in this partition
         df_random.loc[indices, 'rating'] = np.random.permutation(
             df_random.loc[indices, 'rating'].values
         )
-        print("Done")
 
         # Map dataframe indices to matrix coordinates
-        print(f"      Mapping indices...", end=" ")
         mapped_indices = [
             (idx, user_map[global_train_df.loc[idx, 'user_id']],
              item_map[global_train_df.loc[idx, 'item_id']])
             for idx in indices
         ]
-        print("Done")
 
         # Create perturbed matrix
-        print(f"      Creating perturbed matrix...", end=" ")
         M_P, _, _ = convert_to_sparse_matrix(df_random)
         M_P = M_P.astype('float32')
-        print("Done")
 
-        # Compute perturbation impact (this is the slow step)
-        print(f"      Computing SVD perturbation (this may take a while)...", end=" ")
-        import sys
-        sys.stdout.flush()
+        # Compute perturbation impact
         M_tilde, Sigma, Sigma_tilde = compute_perturbation_impact(
             M, M_P, n_components, timing_flag=False
         )
-        print("Done")
 
         # Calculate squared error for each rating
-        print(f"      Calculating errors...", end=" ")
         for idx, row, col in mapped_indices:
             true_rating = M[row, col]
             predicted_rating = M_tilde[row, col]
