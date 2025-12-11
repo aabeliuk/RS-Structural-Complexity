@@ -1087,6 +1087,40 @@ def load_all_results():
     return pd.concat(dfs, ignore_index=True)
 
 
+def load_inter_file(dataset_name, data_path='dataset/'):
+    """
+    Load existing .inter file directly into a pandas DataFrame.
+
+    Parameters:
+    -----------
+    dataset_name : str
+        Name of the dataset
+    data_path : str
+        Path to dataset directory
+
+    Returns:
+    --------
+    pd.DataFrame : Dataset with columns [user_id, item_id, rating, timestamp]
+    """
+    inter_file = os.path.join(data_path, dataset_name, f'{dataset_name}.inter')
+
+    if not os.path.exists(inter_file):
+        raise FileNotFoundError(f"Dataset file not found: {inter_file}")
+
+    print(f"  Loading from: {inter_file}")
+
+    # Read the .inter file (tab-separated, first row is header with type annotations)
+    df = pd.read_csv(inter_file, sep='\t')
+
+    # RecBole .inter files have headers like "user_id:token", "item_id:token", etc.
+    # Remove the type annotations from column names
+    df.columns = [col.split(':')[0] for col in df.columns]
+
+    print(f"  Loaded {len(df):,} interactions")
+
+    return df
+
+
 # =============================================================================
 # MAIN ORCHESTRATION
 # =============================================================================
@@ -1125,33 +1159,9 @@ def main():
         print(f"Processing dataset: {dataset_name}")
         print(f"{'=' * 80}")
 
-        # Load dataset
+        # Load dataset from existing .inter file
         print(f"Loading {dataset_name}...")
-        config = Config(
-            model='BPR',
-            dataset=dataset_name,
-            config_dict={
-                'load_col': {
-                    'inter': ['user_id', 'item_id', 'rating', 'timestamp']
-                }
-            }
-        )
-        dataset = create_dataset(config)
-        df = dataset.inter_feat.copy()
-
-        # Rename columns
-        df_renamed = {}
-        for col in df.columns:
-            col_str = str(col).lower()
-            if 'user' in col_str:
-                df_renamed[col] = 'user_id'
-            elif 'item' in col_str:
-                df_renamed[col] = 'item_id'
-            elif 'rating' in col_str:
-                df_renamed[col] = 'rating'
-            elif 'time' in col_str:
-                df_renamed[col] = 'timestamp'
-        df = df.rename(columns=df_renamed)
+        df = load_inter_file(dataset_name)
 
         # Preprocess
         print(f"Preprocessing...")
