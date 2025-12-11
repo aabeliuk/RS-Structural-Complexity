@@ -1,0 +1,1246 @@
+"""
+Multi-Dataset RS Experiment Script with Relative Performance Analysis
+
+This script runs comprehensive experiments comparing different sampling techniques
+(difficult, random, inverted-difficult) across multiple datasets and RS algorithms.
+It computes Relative Performance Analysis (RPA) to measure performance loss/gain
+compared to 100% sampling baseline.
+
+Author: Generated with Claude Code
+Date: 2025-12-11
+"""
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.sparse import csr_matrix
+import os
+import pickle
+import warnings
+from datetime import datetime
+import torch
+
+# Import RecBole libraries
+from recbole.config import Config
+from recbole.data import create_dataset, data_preparation
+from recbole.utils import init_seed, init_logger, get_model, get_trainer
+
+# Import structural perturbation functions
+from structural_perturbation import (
+    convert_to_sparse_matrix,
+    compute_perturbation_impact
+)
+
+# Suppress warnings for cleaner output
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+
+CONFIG = {
+    # Datasets to process
+    'datasets': [
+        'Amazon_Health_and_Personal_Care',
+        'Amazon_Grocery_and_Gourmet_Food'
+    ],
+
+    # RS Algorithms to test
+    'algorithms': ['LightGCN', 'BPR', 'NeuMF'],
+
+    # Sampling rates to test (%)
+    'sampling_rates': [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+
+    # Sampling strategies
+    'strategies': ['difficult', 'random', 'difficult_inverse'],
+
+    # Experiment parameters
+    'min_ratings': 5,        # Minimum ratings per user/item
+    'max_users': 100000,     # Maximum users to keep
+    'max_items': 100000,     # Maximum items to keep
+    'n_partitions': 10,      # Partitions for perturbation analysis
+    'n_components': 100,     # SVD components for perturbation
+    'eval_k': 10,            # Top-K for evaluation metrics
+    'random_seed': 42,       # Random seed for reproducibility
+
+    # RecBole training parameters
+    'epochs': 50,
+    'train_batch_size': 2048,
+    'eval_batch_size': 4096,
+    'learning_rate': 0.001,
+    'embedding_size': 64,
+
+    # Output directories
+    'results_dir': 'results/',
+    'plots_dir': 'plots/',
+    'cache_dir': 'cache/',
+}
+
+
+# =============================================================================
+# HELPER FUNCTIONS (from notebook)
+# =============================================================================
+
+def setup_directories():
+    """Create output directories if they don't exist."""
+    for dir_path in [CONFIG['results_dir'], CONFIG['plots_dir'], CONFIG['cache_dir']]:
+        os.makedirs(dir_path, exist_ok=True)
+    print("Output directories created/verified.")
+
+
+def preprocess_data(df, min_r=10, max_n=100000):
+    """
+    Preprocess dataset by filtering and subsampling users and items.
+
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Raw dataset with columns: user_id, item_id, rating, timestamp
+    min_r : int
+        Minimum number of ratings per user/item
+    max_n : int
+        Maximum number of users/items to keep
+
+    Returns:
+    --------
+    pd.DataFrame : Filtered dataset
+    """
+    if 'timestamp' in df.columns and not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
+        df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+
+    # Sort by user_id and timestamp
+    sort_cols = ['user_id']
+    if 'timestamp' in df.columns:
+        sort_cols.append('timestamp')
+    df = df.sort_values(by=sort_cols)
+
+    # Filter users with minimum ratings
+    user_ratings_count = df['user_id'].value_counts()
+    valid_users = user_ratings_count[user_ratings_count >= min_r].index
+    df_filtered = df[df['user_id'].isin(valid_users)]
+
+    # Filter items with minimum ratings
+    item_ratings_count = df_filtered['item_id'].value_counts()
+    valid_items = item_ratings_count[item_ratings_count >= min_r].index
+    df_filtered = df_filtered[df_filtered['item_id'].isin(valid_items)]
+
+    # Sample users if too many
+    n_users = len(valid_users)
+    if n_users > max_n:
+        sampled_users = np.random.choice(valid_users, size=max_n, replace=False)
+        df_filtered = df_filtered[df_filtered['user_id'].isin(sampled_users)]
+
+    # Sample items if too many
+    n_items = len(valid_items)
+    if n_items > max_n:
+        sampled_items = np.random.choice(valid_items, size=max_n, replace=False)
+        df_filtered = df_filtered[df_filtered['item_id'].isin(sampled_items)]
+
+    return df_filtered
+
+
+def save_recbole_format(df, dataset_name, output_path='dataset/'):
+    """
+    Save DataFrame to RecBole's .inter format.
+
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Dataset with columns: user_id, item_id, rating, timestamp
+    dataset_name : str
+        Name of the dataset
+    output_path : str
+        Output directory path
+
+    Returns:
+    --------
+    str : Path to the dataset directory
+    """
+    dataset_dir = os.path.join(output_path, dataset_name)
+    os.makedirs(dataset_dir, exist_ok=True)
+    inter_file = os.path.join(dataset_dir, f'{dataset_name}.inter')
+
+    df_export = df.copy()
+    if 'timestamp' in df_export.columns and pd.api.types.is_datetime64_any_dtype(df_export['timestamp']):
+        df_export['timestamp'] = df_export['timestamp'].astype('int64') // 10**9
+
+    if df_export['user_id'].dtype == 'object':
+        user_map = {old_id: new_id for new_id, old_id in enumerate(df_export['user_id'].unique())}
+        df_export['user_id'] = df_export['user_id'].map(user_map)
+
+    if df_export['item_id'].dtype == 'object':
+        item_map = {old_id: new_id for new_id, old_id in enumerate(df_export['item_id'].unique())}
+        df_export['item_id'] = df_export['item_id'].map(item_map)
+
+    with open(inter_file, 'w') as f:
+        header_cols = ['user_id:token', 'item_id:token', 'rating:float']
+        if 'timestamp' in df_export.columns:
+            header_cols.append('timestamp:float')
+        f.write('\t'.join(header_cols) + '\n')
+
+    cols_to_write = ['user_id', 'item_id', 'rating']
+    if 'timestamp' in df_export.columns:
+        cols_to_write.append('timestamp')
+
+    df_export[cols_to_write].to_csv(inter_file, sep='\t', mode='a', header=False, index=False)
+    return dataset_dir
+
+
+def temporal_holdout_split(df, test_ratio=None, leave_n_out=1):
+    """
+    Split data into train and test sets based on temporal holdout.
+
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Dataset with user_id, item_id, rating, timestamp
+    test_ratio : float, optional
+        Ratio of test data per user
+    leave_n_out : int, optional
+        Number of last interactions per user for test
+
+    Returns:
+    --------
+    tuple : (train_df, test_df)
+    """
+    has_timestamp = 'timestamp' in df.columns
+
+    if not has_timestamp:
+        print("  Warning: No timestamp column found. Using sequential order for split.")
+        df = df.copy()
+        df['timestamp'] = range(len(df))
+
+    if test_ratio:
+        cutoff_indices = df.groupby('user_id').cumcount() / df.groupby('user_id')['user_id'].transform('count')
+        train_df = df[cutoff_indices < (1 - test_ratio)]
+        test_df = df[cutoff_indices >= (1 - test_ratio)]
+    elif leave_n_out:
+        cutoff_indices = df.groupby('user_id').cumcount()
+        train_df = df[cutoff_indices < (df.groupby('user_id')['user_id'].transform('count') - leave_n_out)]
+        test_df = df[cutoff_indices >= (df.groupby('user_id')['user_id'].transform('count') - leave_n_out)]
+    else:
+        raise ValueError("Either test_ratio or leave_n_out must be provided.")
+
+    if not has_timestamp:
+        train_df = train_df.drop(columns=['timestamp'])
+        test_df = test_df.drop(columns=['timestamp'])
+
+    return train_df, test_df
+
+
+def train_model_with_fixed_test(train_sample_df, global_test_df, model_type='BPR', config_dict=None):
+    """
+    Train a RecBole model on a sample and evaluate on a fixed global test set.
+
+    Parameters:
+    -----------
+    train_sample_df : pd.DataFrame
+        Training sample with [user_id, item_id, rating, timestamp]
+    global_test_df : pd.DataFrame
+        Fixed global test set (SAME for all models)
+    model_type : str
+        RecBole model type (BPR, NeuMF, LightGCN, etc.)
+    config_dict : dict, optional
+        RecBole configuration overrides
+
+    Returns:
+    --------
+    tuple : (model, config, trainer, dataset, test_data)
+    """
+    # Combine train + test
+    train_sample_df = train_sample_df.copy()
+    global_test_df = global_test_df.copy()
+    combined_df = pd.concat([train_sample_df, global_test_df], ignore_index=True)
+
+    # Save to RecBole format
+    temp_dataset_name = 'temp_train'
+    save_recbole_format(combined_df, temp_dataset_name)
+
+    # Configure RecBole with manual split
+    n_train = len(train_sample_df)
+    n_test = len(global_test_df)
+
+    base_config = {
+        'model': model_type,
+        'dataset': temp_dataset_name,
+        'data_path': 'dataset/',
+        'USER_ID_FIELD': 'user_id',
+        'ITEM_ID_FIELD': 'item_id',
+        'RATING_FIELD': 'rating',
+        'TIME_FIELD': 'timestamp',
+        'load_col': {'inter': ['user_id', 'item_id', 'rating', 'timestamp']},
+
+        # Training parameters
+        'epochs': CONFIG['epochs'],
+        'train_batch_size': CONFIG['train_batch_size'],
+        'eval_batch_size': CONFIG['eval_batch_size'],
+        'learning_rate': CONFIG['learning_rate'],
+        'embedding_size': CONFIG['embedding_size'],
+
+        # CRITICAL: Use ratio split to separate train from test
+        'eval_args': {
+            'split': {'RS': [n_train, 0, n_test]},
+            'mode': 'full',
+            'order': 'RO'
+        },
+
+        # Metrics
+        'topk': [5, 10, 15],
+        'valid_metric': 'NDCG@10',
+        'metrics': ['Recall', 'Precision', 'NDCG', 'Hit', 'MRR', 'MAP'],
+        'train_neg_sample_args': {'distribution': 'uniform', 'sample_num': 1},
+
+        # System
+        'seed': CONFIG['random_seed'],
+        'reproducibility': True,
+        'show_progress': False,
+        'save_dataset': False,
+        'save_dataloaders': False
+    }
+
+    if config_dict:
+        base_config.update(config_dict)
+
+    # Create dataset and dataloaders
+    config = Config(model=model_type, dataset=temp_dataset_name, config_dict=base_config)
+    dataset = create_dataset(config)
+    train_data, valid_data, test_data = data_preparation(config, dataset)
+
+    # Train model
+    model = get_model(config['model'])(config, train_data.dataset).to(config['device'])
+    trainer = get_trainer(config['MODEL_TYPE'], config['model'])(config, model)
+
+    best_valid_score, best_valid_result = trainer.fit(
+        train_data, valid_data, saved=False, show_progress=False
+    )
+
+    return model, config, trainer, dataset, test_data
+
+
+def evaluate_model(model, config, trainer, test_data_loader, k=10):
+    """
+    Evaluate RecBole model on the provided test data loader.
+
+    Parameters:
+    -----------
+    model : RecBole model
+    config : Config
+    trainer : Trainer
+    test_data_loader : DataLoader
+    k : int
+        Top-K for evaluation
+
+    Returns:
+    --------
+    tuple : (precision, ndcg, map_at_k)
+    """
+    test_result = trainer.evaluate(
+        test_data_loader,
+        load_best_model=False,
+        show_progress=False
+    )
+
+    if test_result is None:
+        return 0.0, 0.0, 0.0
+
+    precision = test_result.get(f'precision@{k}', 0.0)
+    ndcg = test_result.get(f'ndcg@{k}', 0.0)
+    map_at_k = test_result.get(f'map@{k}', 0.0)
+
+    return precision, ndcg, map_at_k
+
+
+# =============================================================================
+# PERTURBATION ANALYSIS FUNCTIONS
+# =============================================================================
+
+def compute_difficult_ratings(df, dataset_name, force_recompute=False):
+    """
+    Compute perturbation impact to identify difficult-to-predict ratings.
+
+    This function performs structural perturbation analysis to identify which
+    ratings are most difficult to predict. Results are cached to avoid recomputation.
+
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Dataset with user_id, item_id, rating, timestamp
+    dataset_name : str
+        Name of the dataset (for caching)
+    force_recompute : bool
+        Force recomputation even if cache exists
+
+    Returns:
+    --------
+    dict : {
+        'indices_sorted': np.array of indices sorted by difficulty (hardest first),
+        'indices_sorted_inverted': np.array of indices sorted by difficulty (easiest first),
+        'squared_errors': dict of {index: squared_error},
+        'global_train_df': pd.DataFrame,
+        'global_test_df': pd.DataFrame,
+        'user_map': mapping from user_id to matrix row index,
+        'item_map': mapping from item_id to matrix column index
+    }
+    """
+    cache_file = os.path.join(CONFIG['cache_dir'], f'difficult_ratings_{dataset_name}.pkl')
+
+    # Check cache
+    if not force_recompute and os.path.exists(cache_file):
+        print(f"  Loading cached difficult ratings for {dataset_name}...")
+        with open(cache_file, 'rb') as f:
+            return pickle.load(f)
+
+    print(f"  Computing difficult ratings for {dataset_name}...")
+    print(f"    This may take several minutes...")
+
+    # Split into train/test
+    train_df, test_df = temporal_holdout_split(df, leave_n_out=1)
+
+    # Create global train/test split (90/10)
+    n_total = len(train_df)
+
+    # Sort by timestamp to maintain temporal ordering
+    if 'timestamp' in train_df.columns:
+        train_df_sorted = train_df.sort_values(['user_id', 'timestamp'])
+    else:
+        train_df_sorted = train_df.sort_values(['user_id'])
+
+    # Split by user to ensure each user appears in both sets
+    global_train_list = []
+    global_test_list = []
+
+    for user_id, group in train_df_sorted.groupby('user_id'):
+        n_user_ratings = len(group)
+        n_train = max(1, int(n_user_ratings * 0.9))
+
+        user_train = group.iloc[:n_train]
+        user_test = group.iloc[n_train:]
+
+        global_train_list.append(user_train)
+        if len(user_test) > 0:
+            global_test_list.append(user_test)
+
+    global_train_df = pd.concat(global_train_list, ignore_index=False)
+    global_test_df = pd.concat(global_test_list, ignore_index=False)
+
+    print(f"    Global train: {len(global_train_df):,} ratings")
+    print(f"    Global test: {len(global_test_df):,} ratings")
+
+    # Create partitions
+    all_indices = global_train_df.index.to_numpy()
+    shuffled_indices = np.random.permutation(all_indices)
+    index_partitions = np.array_split(shuffled_indices, CONFIG['n_partitions'])
+
+    # Convert to sparse matrix
+    df_random = global_train_df.copy()
+    M, user_map, item_map = convert_to_sparse_matrix(global_train_df)
+    M = M.astype('float32')
+
+    # Adjust n_components if needed
+    n_components = min(CONFIG['n_components'], int(min(M.shape) / 4))
+    print(f"    Using {n_components} SVD components")
+
+    # Compute perturbation impact
+    squared_errors = {}
+
+    for partition_idx, indices in enumerate(index_partitions, 1):
+        print(f"    Processing partition {partition_idx}/{CONFIG['n_partitions']}...", end=" ")
+
+        # Permute ratings in this partition
+        df_random.loc[indices, 'rating'] = np.random.permutation(
+            df_random.loc[indices, 'rating'].values
+        )
+
+        # Map dataframe indices to matrix coordinates
+        mapped_indices = [
+            (idx, user_map[global_train_df.loc[idx, 'user_id']],
+             item_map[global_train_df.loc[idx, 'item_id']])
+            for idx in indices
+        ]
+
+        # Create perturbed matrix
+        M_P, _, _ = convert_to_sparse_matrix(df_random)
+        M_P = M_P.astype('float32')
+
+        # Compute perturbation impact
+        M_tilde, Sigma, Sigma_tilde = compute_perturbation_impact(
+            M, M_P, n_components, timing_flag=False
+        )
+
+        # Calculate squared error for each rating
+        for idx, row, col in mapped_indices:
+            true_rating = M[row, col]
+            predicted_rating = M_tilde[row, col]
+            squared_error = (true_rating - predicted_rating) ** 2
+            squared_errors[idx] = squared_error
+
+        avg_error = np.mean([squared_errors[idx] for idx, _, _ in mapped_indices])
+        print(f"Done (avg error: {avg_error:.4f})")
+
+    # Sort by squared error
+    indices_sorted = np.array(sorted(squared_errors.keys(),
+                                    key=lambda x: squared_errors[x], reverse=True))
+    indices_sorted_inverted = np.array(sorted(squared_errors.keys(),
+                                             key=lambda x: squared_errors[x], reverse=False))
+
+    errors_sorted = np.array([squared_errors[idx] for idx in indices_sorted])
+
+    print(f"    Difficulty statistics:")
+    print(f"      Mean error: {errors_sorted.mean():.4f}")
+    print(f"      Max error: {errors_sorted.max():.4f}")
+    print(f"      Min error: {errors_sorted.min():.4f}")
+
+    # Package results
+    result = {
+        'indices_sorted': indices_sorted,
+        'indices_sorted_inverted': indices_sorted_inverted,
+        'squared_errors': squared_errors,
+        'global_train_df': global_train_df,
+        'global_test_df': global_test_df,
+        'user_map': user_map,
+        'item_map': item_map
+    }
+
+    # Cache results
+    print(f"    Caching results to {cache_file}")
+    with open(cache_file, 'wb') as f:
+        pickle.dump(result, f)
+
+    return result
+
+
+# =============================================================================
+# EXPERIMENT EXECUTION FUNCTIONS
+# =============================================================================
+
+def run_single_experiment(train_sample_df, global_test_df, algorithm, strategy,
+                         sampling_rate, n_ratings):
+    """
+    Run a single experiment: train model and evaluate.
+
+    Parameters:
+    -----------
+    train_sample_df : pd.DataFrame
+        Training sample
+    global_test_df : pd.DataFrame
+        Fixed global test set
+    algorithm : str
+        RS algorithm name
+    strategy : str
+        Sampling strategy name
+    sampling_rate : int
+        Sampling rate percentage
+    n_ratings : int
+        Number of ratings in sample
+
+    Returns:
+    --------
+    dict : Result dictionary with metrics
+    """
+    try:
+        # Train model
+        model, config, trainer, dataset, test_data = train_model_with_fixed_test(
+            train_sample_df, global_test_df, model_type=algorithm
+        )
+
+        # Evaluate
+        precision, ndcg, map_score = evaluate_model(
+            model, config, trainer, test_data, k=CONFIG['eval_k']
+        )
+
+        # Clear GPU memory
+        del model, trainer
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        return {
+            'sampling_rate': sampling_rate,
+            'strategy': strategy,
+            'precision': precision,
+            'ndcg': ndcg,
+            'map': map_score,
+            'n_ratings': n_ratings,
+            'status': 'success'
+        }
+
+    except Exception as e:
+        print(f"      ERROR: {str(e)}")
+        return {
+            'sampling_rate': sampling_rate,
+            'strategy': strategy,
+            'precision': 0.0,
+            'ndcg': 0.0,
+            'map': 0.0,
+            'n_ratings': n_ratings,
+            'status': 'failed',
+            'error': str(e)
+        }
+
+
+def run_experiments_for_dataset(dataset_name, algorithm, difficult_data):
+    """
+    Run all experiments for one dataset and one algorithm.
+
+    Parameters:
+    -----------
+    dataset_name : str
+        Name of the dataset
+    algorithm : str
+        RS algorithm name
+    difficult_data : dict
+        Perturbation analysis results from compute_difficult_ratings()
+
+    Returns:
+    --------
+    pd.DataFrame : Results for all experiments
+    """
+    results = []
+
+    global_train_df = difficult_data['global_train_df']
+    global_test_df = difficult_data['global_test_df']
+    indices_sorted = difficult_data['indices_sorted']
+    indices_sorted_inverted = difficult_data['indices_sorted_inverted']
+    global_train_indices = set(global_train_df.index)
+
+    # Filter indices to only those in global_train_df
+    indices_sorted_filtered = [idx for idx in indices_sorted
+                              if idx in global_train_indices]
+    indices_sorted_inverted_filtered = [idx for idx in indices_sorted_inverted
+                                       if idx in global_train_indices]
+
+    for sampling_rate in CONFIG['sampling_rates']:
+        n_samples = int(len(global_train_df) * sampling_rate / 100)
+        print(f"    Sampling rate: {sampling_rate}% ({n_samples:,} ratings)")
+
+        # Strategy 1: DIFFICULT
+        print(f"      [1/3] Difficult sampling...", end=" ")
+        difficult_indices = indices_sorted_filtered[:n_samples]
+        difficult_df = global_train_df.loc[difficult_indices].sample(frac=1)
+
+        result = run_single_experiment(
+            difficult_df, global_test_df, algorithm,
+            'difficult', sampling_rate, n_samples
+        )
+        result['dataset'] = dataset_name
+        result['algorithm'] = algorithm
+        results.append(result)
+        print(f"P@{CONFIG['eval_k']}={result['precision']:.4f}")
+
+        # Strategy 2: RANDOM
+        print(f"      [2/3] Random sampling...", end=" ")
+        random_indices = np.random.choice(
+            global_train_df.index, size=n_samples, replace=False
+        )
+        random_df = global_train_df.loc[random_indices].sample(frac=1)
+
+        result = run_single_experiment(
+            random_df, global_test_df, algorithm,
+            'random', sampling_rate, n_samples
+        )
+        result['dataset'] = dataset_name
+        result['algorithm'] = algorithm
+        results.append(result)
+        print(f"P@{CONFIG['eval_k']}={result['precision']:.4f}")
+
+        # Strategy 3: DIFFICULT INVERSE (easiest)
+        print(f"      [3/3] Easiest sampling...", end=" ")
+        easy_indices = indices_sorted_inverted_filtered[:n_samples]
+        easy_df = global_train_df.loc[easy_indices].sample(frac=1)
+
+        result = run_single_experiment(
+            easy_df, global_test_df, algorithm,
+            'difficult_inverse', sampling_rate, n_samples
+        )
+        result['dataset'] = dataset_name
+        result['algorithm'] = algorithm
+        results.append(result)
+        print(f"P@{CONFIG['eval_k']}={result['precision']:.4f}")
+
+    return pd.DataFrame(results)
+
+
+# =============================================================================
+# RELATIVE PERFORMANCE ANALYSIS (RPA)
+# =============================================================================
+
+def calculate_rpa(results_df):
+    """
+    Calculate Relative Performance Analysis: percentage improvement vs 100% baseline.
+
+    Formula: RPA = (metric@X% - metric@100%) / metric@100% * 100
+
+    Parameters:
+    -----------
+    results_df : pd.DataFrame
+        Results with columns: dataset, algorithm, sampling_rate, strategy, metrics
+
+    Returns:
+    --------
+    pd.DataFrame : Results with additional RPA columns
+    """
+    results_df = results_df.copy()
+
+    # Add RPA columns
+    results_df['precision_rpa'] = 0.0
+    results_df['ndcg_rpa'] = 0.0
+    results_df['map_rpa'] = 0.0
+
+    # Calculate RPA for each dataset + algorithm + strategy combination
+    for (dataset, algorithm, strategy), group in results_df.groupby(['dataset', 'algorithm', 'strategy']):
+        # Get 100% baseline
+        baseline = group[group['sampling_rate'] == 100]
+        if len(baseline) == 0:
+            continue
+
+        baseline_precision = baseline['precision'].values[0]
+        baseline_ndcg = baseline['ndcg'].values[0]
+        baseline_map = baseline['map'].values[0]
+
+        # Avoid division by zero
+        if baseline_precision == 0:
+            baseline_precision = 1e-10
+        if baseline_ndcg == 0:
+            baseline_ndcg = 1e-10
+        if baseline_map == 0:
+            baseline_map = 1e-10
+
+        # Calculate RPA for each sampling rate
+        mask = ((results_df['dataset'] == dataset) &
+                (results_df['algorithm'] == algorithm) &
+                (results_df['strategy'] == strategy))
+
+        results_df.loc[mask, 'precision_rpa'] = (
+            (results_df.loc[mask, 'precision'] - baseline_precision) / baseline_precision * 100
+        )
+        results_df.loc[mask, 'ndcg_rpa'] = (
+            (results_df.loc[mask, 'ndcg'] - baseline_ndcg) / baseline_ndcg * 100
+        )
+        results_df.loc[mask, 'map_rpa'] = (
+            (results_df.loc[mask, 'map'] - baseline_map) / baseline_map * 100
+        )
+
+    return results_df
+
+
+# =============================================================================
+# VISUALIZATION FUNCTIONS
+# =============================================================================
+
+def plot_metrics(results_df, dataset_name, algorithm):
+    """
+    Generate standard metric plots (Precision, NDCG, MAP).
+
+    Parameters:
+    -----------
+    results_df : pd.DataFrame
+        Results for this dataset and algorithm
+    dataset_name : str
+        Name of the dataset
+    algorithm : str
+        RS algorithm name
+    """
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    # Color scheme
+    color_difficult = '#E63946'
+    color_random = '#457B9D'
+    color_easy = '#1EC423'
+
+    # Filter data
+    data = results_df[(results_df['dataset'] == dataset_name) &
+                      (results_df['algorithm'] == algorithm)]
+
+    difficult_data = data[data['strategy'] == 'difficult'].sort_values('sampling_rate')
+    random_data = data[data['strategy'] == 'random'].sort_values('sampling_rate')
+    easy_data = data[data['strategy'] == 'difficult_inverse'].sort_values('sampling_rate')
+
+    # Plot 1: Precision
+    axes[0].plot(difficult_data['sampling_rate'], difficult_data['precision'],
+                 marker='o', linewidth=2.5, markersize=8,
+                 color=color_difficult, label='Difficult', linestyle='-')
+    axes[0].plot(random_data['sampling_rate'], random_data['precision'],
+                 marker='s', linewidth=2.5, markersize=8,
+                 color=color_random, label='Random', linestyle='--')
+    axes[0].plot(easy_data['sampling_rate'], easy_data['precision'],
+                 marker='^', linewidth=2.5, markersize=8,
+                 color=color_easy, label='Easiest', linestyle=':')
+    axes[0].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
+    axes[0].set_ylabel(f'Precision@{CONFIG["eval_k"]}', fontsize=12, fontweight='bold')
+    axes[0].set_title(f'Precision@{CONFIG["eval_k"]}', fontsize=14, fontweight='bold')
+    axes[0].grid(True, alpha=0.3, linestyle='--')
+    axes[0].legend(fontsize=11, loc='best')
+    axes[0].set_xticks(CONFIG['sampling_rates'])
+
+    # Plot 2: NDCG
+    axes[1].plot(difficult_data['sampling_rate'], difficult_data['ndcg'],
+                 marker='o', linewidth=2.5, markersize=8,
+                 color=color_difficult, label='Difficult', linestyle='-')
+    axes[1].plot(random_data['sampling_rate'], random_data['ndcg'],
+                 marker='s', linewidth=2.5, markersize=8,
+                 color=color_random, label='Random', linestyle='--')
+    axes[1].plot(easy_data['sampling_rate'], easy_data['ndcg'],
+                 marker='^', linewidth=2.5, markersize=8,
+                 color=color_easy, label='Easiest', linestyle=':')
+    axes[1].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
+    axes[1].set_ylabel(f'NDCG@{CONFIG["eval_k"]}', fontsize=12, fontweight='bold')
+    axes[1].set_title(f'NDCG@{CONFIG["eval_k"]}', fontsize=14, fontweight='bold')
+    axes[1].grid(True, alpha=0.3, linestyle='--')
+    axes[1].legend(fontsize=11, loc='best')
+    axes[1].set_xticks(CONFIG['sampling_rates'])
+
+    # Plot 3: MAP
+    axes[2].plot(difficult_data['sampling_rate'], difficult_data['map'],
+                 marker='o', linewidth=2.5, markersize=8,
+                 color=color_difficult, label='Difficult', linestyle='-')
+    axes[2].plot(random_data['sampling_rate'], random_data['map'],
+                 marker='s', linewidth=2.5, markersize=8,
+                 color=color_random, label='Random', linestyle='--')
+    axes[2].plot(easy_data['sampling_rate'], easy_data['map'],
+                 marker='^', linewidth=2.5, markersize=8,
+                 color=color_easy, label='Easiest', linestyle=':')
+    axes[2].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
+    axes[2].set_ylabel(f'MAP@{CONFIG["eval_k"]}', fontsize=12, fontweight='bold')
+    axes[2].set_title(f'MAP@{CONFIG["eval_k"]}', fontsize=14, fontweight='bold')
+    axes[2].grid(True, alpha=0.3, linestyle='--')
+    axes[2].legend(fontsize=11, loc='best')
+    axes[2].set_xticks(CONFIG['sampling_rates'])
+
+    plt.suptitle(f'{dataset_name} - {algorithm}', fontsize=16, fontweight='bold', y=1.02)
+    plt.tight_layout()
+
+    # Save
+    filename = f'{dataset_name}_{algorithm}_metrics.png'
+    filepath = os.path.join(CONFIG['plots_dir'], filename)
+    plt.savefig(filepath, dpi=300, bbox_inches='tight')
+    plt.close()
+
+    print(f"      Saved metrics plot: {filepath}")
+
+
+def plot_rpa(results_df, dataset_name, algorithm):
+    """
+    Generate Relative Performance Analysis plots.
+
+    Parameters:
+    -----------
+    results_df : pd.DataFrame
+        Results with RPA columns
+    dataset_name : str
+        Name of the dataset
+    algorithm : str
+        RS algorithm name
+    """
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    # Color scheme
+    color_difficult = '#E63946'
+    color_random = '#457B9D'
+    color_easy = '#1EC423'
+
+    # Filter data (exclude 100% as it's the baseline)
+    data = results_df[(results_df['dataset'] == dataset_name) &
+                      (results_df['algorithm'] == algorithm) &
+                      (results_df['sampling_rate'] != 100)]
+
+    difficult_data = data[data['strategy'] == 'difficult'].sort_values('sampling_rate')
+    random_data = data[data['strategy'] == 'random'].sort_values('sampling_rate')
+    easy_data = data[data['strategy'] == 'difficult_inverse'].sort_values('sampling_rate')
+
+    # Plot 1: Precision RPA
+    axes[0].plot(difficult_data['sampling_rate'], difficult_data['precision_rpa'],
+                 marker='o', linewidth=2.5, markersize=8,
+                 color=color_difficult, label='Difficult', linestyle='-')
+    axes[0].plot(random_data['sampling_rate'], random_data['precision_rpa'],
+                 marker='s', linewidth=2.5, markersize=8,
+                 color=color_random, label='Random', linestyle='--')
+    axes[0].plot(easy_data['sampling_rate'], easy_data['precision_rpa'],
+                 marker='^', linewidth=2.5, markersize=8,
+                 color=color_easy, label='Easiest', linestyle=':')
+    axes[0].axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+    axes[0].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
+    axes[0].set_ylabel('RPA (%)', fontsize=12, fontweight='bold')
+    axes[0].set_title(f'Precision@{CONFIG["eval_k"]} RPA', fontsize=14, fontweight='bold')
+    axes[0].grid(True, alpha=0.3, linestyle='--')
+    axes[0].legend(fontsize=11, loc='best')
+
+    # Plot 2: NDCG RPA
+    axes[1].plot(difficult_data['sampling_rate'], difficult_data['ndcg_rpa'],
+                 marker='o', linewidth=2.5, markersize=8,
+                 color=color_difficult, label='Difficult', linestyle='-')
+    axes[1].plot(random_data['sampling_rate'], random_data['ndcg_rpa'],
+                 marker='s', linewidth=2.5, markersize=8,
+                 color=color_random, label='Random', linestyle='--')
+    axes[1].plot(easy_data['sampling_rate'], easy_data['ndcg_rpa'],
+                 marker='^', linewidth=2.5, markersize=8,
+                 color=color_easy, label='Easiest', linestyle=':')
+    axes[1].axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+    axes[1].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
+    axes[1].set_ylabel('RPA (%)', fontsize=12, fontweight='bold')
+    axes[1].set_title(f'NDCG@{CONFIG["eval_k"]} RPA', fontsize=14, fontweight='bold')
+    axes[1].grid(True, alpha=0.3, linestyle='--')
+    axes[1].legend(fontsize=11, loc='best')
+
+    # Plot 3: MAP RPA
+    axes[2].plot(difficult_data['sampling_rate'], difficult_data['map_rpa'],
+                 marker='o', linewidth=2.5, markersize=8,
+                 color=color_difficult, label='Difficult', linestyle='-')
+    axes[2].plot(random_data['sampling_rate'], random_data['map_rpa'],
+                 marker='s', linewidth=2.5, markersize=8,
+                 color=color_random, label='Random', linestyle='--')
+    axes[2].plot(easy_data['sampling_rate'], easy_data['map_rpa'],
+                 marker='^', linewidth=2.5, markersize=8,
+                 color=color_easy, label='Easiest', linestyle=':')
+    axes[2].axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+    axes[2].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
+    axes[2].set_ylabel('RPA (%)', fontsize=12, fontweight='bold')
+    axes[2].set_title(f'MAP@{CONFIG["eval_k"]} RPA', fontsize=14, fontweight='bold')
+    axes[2].grid(True, alpha=0.3, linestyle='--')
+    axes[2].legend(fontsize=11, loc='best')
+
+    plt.suptitle(f'{dataset_name} - {algorithm} - Relative Performance Analysis',
+                 fontsize=16, fontweight='bold', y=1.02)
+    plt.tight_layout()
+
+    # Save
+    filename = f'{dataset_name}_{algorithm}_rpa.png'
+    filepath = os.path.join(CONFIG['plots_dir'], filename)
+    plt.savefig(filepath, dpi=300, bbox_inches='tight')
+    plt.close()
+
+    print(f"      Saved RPA plot: {filepath}")
+
+
+def plot_aggregated_comparison(results_df):
+    """
+    Generate aggregated comparison plots across datasets and algorithms.
+
+    Parameters:
+    -----------
+    results_df : pd.DataFrame
+        All results with RPA columns
+    """
+    # Plot 1: Average RPA across datasets for each strategy
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    color_difficult = '#E63946'
+    color_random = '#457B9D'
+    color_easy = '#1EC423'
+
+    # Exclude 100% sampling rate
+    data = results_df[results_df['sampling_rate'] != 100]
+
+    # Group by strategy and sampling rate, average across datasets and algorithms
+    avg_rpa = data.groupby(['strategy', 'sampling_rate']).agg({
+        'precision_rpa': 'mean',
+        'ndcg_rpa': 'mean',
+        'map_rpa': 'mean'
+    }).reset_index()
+
+    difficult_avg = avg_rpa[avg_rpa['strategy'] == 'difficult'].sort_values('sampling_rate')
+    random_avg = avg_rpa[avg_rpa['strategy'] == 'random'].sort_values('sampling_rate')
+    easy_avg = avg_rpa[avg_rpa['strategy'] == 'difficult_inverse'].sort_values('sampling_rate')
+
+    # Precision RPA
+    axes[0].plot(difficult_avg['sampling_rate'], difficult_avg['precision_rpa'],
+                 marker='o', linewidth=2.5, markersize=8,
+                 color=color_difficult, label='Difficult', linestyle='-')
+    axes[0].plot(random_avg['sampling_rate'], random_avg['precision_rpa'],
+                 marker='s', linewidth=2.5, markersize=8,
+                 color=color_random, label='Random', linestyle='--')
+    axes[0].plot(easy_avg['sampling_rate'], easy_avg['precision_rpa'],
+                 marker='^', linewidth=2.5, markersize=8,
+                 color=color_easy, label='Easiest', linestyle=':')
+    axes[0].axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+    axes[0].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
+    axes[0].set_ylabel('Average RPA (%)', fontsize=12, fontweight='bold')
+    axes[0].set_title(f'Precision@{CONFIG["eval_k"]} - Average RPA', fontsize=14, fontweight='bold')
+    axes[0].grid(True, alpha=0.3, linestyle='--')
+    axes[0].legend(fontsize=11, loc='best')
+
+    # NDCG RPA
+    axes[1].plot(difficult_avg['sampling_rate'], difficult_avg['ndcg_rpa'],
+                 marker='o', linewidth=2.5, markersize=8,
+                 color=color_difficult, label='Difficult', linestyle='-')
+    axes[1].plot(random_avg['sampling_rate'], random_avg['ndcg_rpa'],
+                 marker='s', linewidth=2.5, markersize=8,
+                 color=color_random, label='Random', linestyle='--')
+    axes[1].plot(easy_avg['sampling_rate'], easy_avg['ndcg_rpa'],
+                 marker='^', linewidth=2.5, markersize=8,
+                 color=color_easy, label='Easiest', linestyle=':')
+    axes[1].axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+    axes[1].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
+    axes[1].set_ylabel('Average RPA (%)', fontsize=12, fontweight='bold')
+    axes[1].set_title(f'NDCG@{CONFIG["eval_k"]} - Average RPA', fontsize=14, fontweight='bold')
+    axes[1].grid(True, alpha=0.3, linestyle='--')
+    axes[1].legend(fontsize=11, loc='best')
+
+    # MAP RPA
+    axes[2].plot(difficult_avg['sampling_rate'], difficult_avg['map_rpa'],
+                 marker='o', linewidth=2.5, markersize=8,
+                 color=color_difficult, label='Difficult', linestyle='-')
+    axes[2].plot(random_avg['sampling_rate'], random_avg['map_rpa'],
+                 marker='s', linewidth=2.5, markersize=8,
+                 color=color_random, label='Random', linestyle='--')
+    axes[2].plot(easy_avg['sampling_rate'], easy_avg['map_rpa'],
+                 marker='^', linewidth=2.5, markersize=8,
+                 color=color_easy, label='Easiest', linestyle=':')
+    axes[2].axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+    axes[2].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
+    axes[2].set_ylabel('Average RPA (%)', fontsize=12, fontweight='bold')
+    axes[2].set_title(f'MAP@{CONFIG["eval_k"]} - Average RPA', fontsize=14, fontweight='bold')
+    axes[2].grid(True, alpha=0.3, linestyle='--')
+    axes[2].legend(fontsize=11, loc='best')
+
+    plt.suptitle('Average Relative Performance Analysis Across All Datasets',
+                 fontsize=16, fontweight='bold', y=1.02)
+    plt.tight_layout()
+
+    # Save
+    filepath = os.path.join(CONFIG['plots_dir'], 'aggregated_rpa.png')
+    plt.savefig(filepath, dpi=300, bbox_inches='tight')
+    plt.close()
+
+    print(f"  Saved aggregated RPA plot: {filepath}")
+
+    # Plot 2: Heatmap showing best strategy at 50% sampling
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    # Filter for 50% sampling
+    data_50 = results_df[results_df['sampling_rate'] == 50]
+
+    # Pivot for heatmap (NDCG as metric)
+    heatmap_data = data_50.pivot_table(
+        index='dataset',
+        columns='algorithm',
+        values='ndcg',
+        aggfunc='max'
+    )
+
+    sns.heatmap(heatmap_data, annot=True, fmt='.4f', cmap='YlOrRd',
+                ax=ax, cbar_kws={'label': f'NDCG@{CONFIG["eval_k"]}'})
+    ax.set_title(f'Best NDCG@{CONFIG["eval_k"]} at 50% Sampling (by Dataset × Algorithm)',
+                 fontsize=14, fontweight='bold')
+    ax.set_xlabel('Algorithm', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Dataset', fontsize=12, fontweight='bold')
+
+    plt.tight_layout()
+
+    filepath = os.path.join(CONFIG['plots_dir'], 'heatmap_50pct_sampling.png')
+    plt.savefig(filepath, dpi=300, bbox_inches='tight')
+    plt.close()
+
+    print(f"  Saved heatmap plot: {filepath}")
+
+
+# =============================================================================
+# RESULTS SAVING/LOADING
+# =============================================================================
+
+def save_results(results_df, dataset_name=None, algorithm=None, filename=None):
+    """
+    Save results to CSV.
+
+    Parameters:
+    -----------
+    results_df : pd.DataFrame
+        Results to save
+    dataset_name : str, optional
+        Dataset name (for specific file)
+    algorithm : str, optional
+        Algorithm name (for specific file)
+    filename : str, optional
+        Custom filename
+    """
+    if filename:
+        filepath = os.path.join(CONFIG['results_dir'], filename)
+    elif dataset_name and algorithm:
+        filepath = os.path.join(CONFIG['results_dir'], f'{dataset_name}_{algorithm}.csv')
+    else:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filepath = os.path.join(CONFIG['results_dir'], f'results_{timestamp}.csv')
+
+    results_df.to_csv(filepath, index=False)
+    print(f"    Saved results to: {filepath}")
+
+
+def load_all_results():
+    """
+    Load all result CSV files from results directory.
+
+    Returns:
+    --------
+    pd.DataFrame : Combined results
+    """
+    all_files = [f for f in os.listdir(CONFIG['results_dir']) if f.endswith('.csv')]
+
+    if not all_files:
+        return pd.DataFrame()
+
+    dfs = []
+    for file in all_files:
+        filepath = os.path.join(CONFIG['results_dir'], file)
+        df = pd.read_csv(filepath)
+        dfs.append(df)
+
+    return pd.concat(dfs, ignore_index=True)
+
+
+# =============================================================================
+# MAIN ORCHESTRATION
+# =============================================================================
+
+def main():
+    """
+    Main function to orchestrate all experiments.
+    """
+    print("=" * 80)
+    print("Multi-Dataset RS Experiment Script with Relative Performance Analysis")
+    print("=" * 80)
+    print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print()
+
+    # Setup
+    print("Setting up...")
+    setup_directories()
+    np.random.seed(CONFIG['random_seed'])
+    init_seed(CONFIG['random_seed'], True)
+    print()
+
+    # Print configuration
+    print("Configuration:")
+    print(f"  Datasets: {CONFIG['datasets']}")
+    print(f"  Algorithms: {CONFIG['algorithms']}")
+    print(f"  Sampling rates: {CONFIG['sampling_rates']}")
+    print(f"  Strategies: {CONFIG['strategies']}")
+    print(f"  Evaluation: {CONFIG['eval_k']}")
+    print()
+
+    # Run experiments
+    all_results = []
+
+    for dataset_name in CONFIG['datasets']:
+        print(f"{'=' * 80}")
+        print(f"Processing dataset: {dataset_name}")
+        print(f"{'=' * 80}")
+
+        # Load dataset
+        print(f"Loading {dataset_name}...")
+        config = Config(
+            model='BPR',
+            dataset=dataset_name,
+            config_dict={
+                'load_col': {
+                    'inter': ['user_id', 'item_id', 'rating', 'timestamp']
+                }
+            }
+        )
+        dataset = create_dataset(config)
+        df = dataset.inter_feat.copy()
+
+        # Rename columns
+        df_renamed = {}
+        for col in df.columns:
+            col_str = str(col).lower()
+            if 'user' in col_str:
+                df_renamed[col] = 'user_id'
+            elif 'item' in col_str:
+                df_renamed[col] = 'item_id'
+            elif 'rating' in col_str:
+                df_renamed[col] = 'rating'
+            elif 'time' in col_str:
+                df_renamed[col] = 'timestamp'
+        df = df.rename(columns=df_renamed)
+
+        # Preprocess
+        print(f"Preprocessing...")
+        df = preprocess_data(df, min_r=CONFIG['min_ratings'], max_n=CONFIG['max_users'])
+
+        n_users = df['user_id'].nunique()
+        n_items = df['item_id'].nunique()
+        n_ratings = len(df)
+        sparsity = 1 - (n_ratings / (n_users * n_items))
+
+        print(f"  Users: {n_users:,}")
+        print(f"  Items: {n_items:,}")
+        print(f"  Ratings: {n_ratings:,}")
+        print(f"  Sparsity: {sparsity:.4f}")
+        print()
+
+        # Compute/load difficult ratings
+        difficult_data = compute_difficult_ratings(df, dataset_name)
+        print()
+
+        # Run experiments for each algorithm
+        for algorithm in CONFIG['algorithms']:
+            print(f"  {'~' * 76}")
+            print(f"  Algorithm: {algorithm}")
+            print(f"  {'~' * 76}")
+
+            results_df = run_experiments_for_dataset(
+                dataset_name, algorithm, difficult_data
+            )
+
+            # Save results
+            save_results(results_df, dataset_name, algorithm)
+            all_results.append(results_df)
+
+            # Calculate RPA
+            results_df = calculate_rpa(results_df)
+
+            # Generate plots
+            print(f"    Generating visualizations...")
+            plot_metrics(results_df, dataset_name, algorithm)
+            plot_rpa(results_df, dataset_name, algorithm)
+            print()
+
+    # Aggregate results
+    print(f"{'=' * 80}")
+    print("Generating aggregated analysis...")
+    print(f"{'=' * 80}")
+
+    combined_results = pd.concat(all_results, ignore_index=True)
+    combined_results = calculate_rpa(combined_results)
+
+    # Save combined results
+    save_results(combined_results, filename='all_results_summary.csv')
+
+    # Generate aggregated plots
+    plot_aggregated_comparison(combined_results)
+
+    print()
+    print(f"{'=' * 80}")
+    print("Experiments completed successfully!")
+    print(f"{'=' * 80}")
+    print(f"End time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print()
+    print("Results saved to:")
+    print(f"  - CSV files: {CONFIG['results_dir']}")
+    print(f"  - Plots: {CONFIG['plots_dir']}")
+    print(f"  - Cache: {CONFIG['cache_dir']}")
+    print()
+
+    # Print summary statistics
+    print("Summary Statistics:")
+    print("-" * 80)
+    for dataset in CONFIG['datasets']:
+        for algorithm in CONFIG['algorithms']:
+            data = combined_results[(combined_results['dataset'] == dataset) &
+                                   (combined_results['algorithm'] == algorithm) &
+                                   (combined_results['sampling_rate'] == 100)]
+
+            if len(data) > 0:
+                print(f"{dataset} - {algorithm}:")
+                for strategy in CONFIG['strategies']:
+                    strat_data = data[data['strategy'] == strategy]
+                    if len(strat_data) > 0:
+                        row = strat_data.iloc[0]
+                        print(f"  {strategy:20s}: P@{CONFIG['eval_k']}={row['precision']:.4f}, "
+                              f"NDCG@{CONFIG['eval_k']}={row['ndcg']:.4f}, "
+                              f"MAP@{CONFIG['eval_k']}={row['map']:.4f}")
+                print()
+
+
+if __name__ == '__main__':
+    main()
