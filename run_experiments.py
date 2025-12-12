@@ -25,6 +25,8 @@ import torch
 from recbole.config import Config
 from recbole.data import create_dataset, data_preparation
 from recbole.utils import init_seed, init_logger, get_model, get_trainer
+from recbole.data.interaction import Interaction
+from recbole.data.dataloader.general_dataloader import FullSortEvalDataLoader
 
 # Import structural perturbation functions
 from structural_perturbation import (
@@ -43,25 +45,34 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 CONFIG = {
     # Datasets to process
     'datasets': [
-        'Amazon_Health_and_Personal_Care',
-        'Amazon_Grocery_and_Gourmet_Food'
+        # 'Amazon_Health_and_Personal_Care',
+        # 'Amazon_Grocery_and_Gourmet_Food',
+        'book-crossing',
+        'lastfm',
+        'ModCloth',
+        'pinterest',
+        'RateBeer',
+        'steam',
+        'yelp2022'
     ],
 
     # RS Algorithms to test
-    'algorithms': ['LightGCN', 'BPR', 'NeuMF'],
+    # 'algorithms': ['LightGCN', 'BPR', 'NeuMF'],
+    'algorithms': ['BPR'],
 
     # Sampling rates to test (%)
-    'sampling_rates': [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+    # 'sampling_rates': [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+    'sampling_rates': [10, 40, 70 , 100],
 
     # Sampling strategies
     'strategies': ['difficult', 'random', 'difficult_inverse'],
 
     # Experiment parameters
-    'min_ratings': 5,        # Minimum ratings per user/item
+    'min_ratings': 6,        # Minimum ratings per user/item
     'max_users': 100000,     # Maximum users to keep
     'max_items': 100000,     # Maximum items to keep
     'n_partitions': 10,      # Partitions for perturbation analysis
-    'n_components': 100,     # SVD components for perturbation
+    'n_components': 50,     # SVD components for perturbation
     'eval_k': 10,            # Top-K for evaluation metrics
     'random_seed': 42,       # Random seed for reproducibility
 
@@ -230,94 +241,134 @@ def temporal_holdout_split(df, test_ratio=None, leave_n_out=1):
     return train_df, test_df
 
 
-def train_model_with_fixed_test(train_sample_df, global_test_df, model_type='BPR', config_dict=None):
+
+
+
+def build_test_dataloader_from_df(test_df, dataset, config):
     """
-    Train a RecBole model on a sample and evaluate on a fixed global test set.
+    Convert a test pandas DF to RecBole Interaction format
+    and wrap it into a FullSortEvalDataLoader.
+    """
 
-    Parameters:
-    -----------
-    train_sample_df : pd.DataFrame
-        Training sample with [user_id, item_id, rating, timestamp]
-    global_test_df : pd.DataFrame
-        Fixed global test set (SAME for all models)
-    model_type : str
-        RecBole model type (BPR, NeuMF, LightGCN, etc.)
-    config_dict : dict, optional
-        RecBole configuration overrides
+    # Map raw tokens → dataset's internal numeric IDs
+    uid_map = dataset.field2id_token['user_id']
+    iid_map = dataset.field2id_token['item_id']
 
+    # Filter out unknown users/items
+    df = test_df[
+        test_df['user_id'].isin(uid_map) &
+        test_df['item_id'].isin(iid_map)
+    ].copy()
+
+    df['user_id'] = df['user_id'].map(uid_map)
+    df['item_id'] = df['item_id'].map(iid_map)
+
+    # Create RecBole Interaction object
+    interaction = Interaction({
+        'user_id': df['user_id'].values,
+        'item_id': df['item_id'].values
+    })
+
+    # Build FullSortEvalDataLoader
+    test_loader = FullSortEvalDataLoader(
+        config,
+        dataset,
+        interaction,
+        shuffle=False
+    )
+
+    return test_loader
+
+
+def train_model_with_fixed_test(train_df, global_test_df, model_type='BPR', config_dict=None):
+    """
+    Train a RecBole model using ONLY `train_df`.
+    Evaluate later on a manually built test loader using `global_test_df`.
+    
     Returns:
-    --------
-    tuple : (model, config, trainer, dataset, test_data)
+        model, config, trainer, dataset, test_data_loader
     """
-    # Combine train + test
-    train_sample_df = train_sample_df.copy()
-    global_test_df = global_test_df.copy()
-    combined_df = pd.concat([train_sample_df, global_test_df], ignore_index=True)
 
-    # Save to RecBole format
-    temp_dataset_name = 'temp_train'
-    save_recbole_format(combined_df, temp_dataset_name)
+    # -----------------------------------------------------------
+    # 2.1 Save ONLY the training DF (NO TEST DF!)
+    # -----------------------------------------------------------
+    tmp_dataset = "temp_train"
+    save_recbole_format(train_df, tmp_dataset)
 
-    # Configure RecBole with manual split
-    n_train = len(train_sample_df)
-    n_test = len(global_test_df)
-
+    # -----------------------------------------------------------
+    # 2.2 Base RecBole configuration
+    # -----------------------------------------------------------
     base_config = {
         'model': model_type,
-        'dataset': temp_dataset_name,
+        'dataset': tmp_dataset,
         'data_path': 'dataset/',
+
+        # Fields
         'USER_ID_FIELD': 'user_id',
         'ITEM_ID_FIELD': 'item_id',
         'RATING_FIELD': 'rating',
         'TIME_FIELD': 'timestamp',
         'load_col': {'inter': ['user_id', 'item_id', 'rating', 'timestamp']},
 
-        # Training parameters
-        'epochs': CONFIG['epochs'],
-        'train_batch_size': CONFIG['train_batch_size'],
-        'eval_batch_size': CONFIG['eval_batch_size'],
-        'learning_rate': CONFIG['learning_rate'],
-        'embedding_size': CONFIG['embedding_size'],
-
-        # CRITICAL: Use ratio split to separate train from test
+        # ↓↓↓ IMPORTANT ↓↓↓
+        # Disable RecBole's internal splitting.
         'eval_args': {
-            'split': {'RS': [n_train, 0, n_test]},
+            'split': {'RS': [1.0, 0.0, 0.0]},
             'mode': 'full',
             'order': 'RO'
         },
 
-        # Metrics
-        'topk': [5, 10, 15],
-        'valid_metric': 'NDCG@10',
-        'metrics': ['Recall', 'Precision', 'NDCG', 'Hit', 'MRR', 'MAP'],
-        'train_neg_sample_args': {'distribution': 'uniform', 'sample_num': 1},
+        # Performance settings
+        'epochs': 20,
+        'train_batch_size': 2048,
+        'eval_batch_size': 4096,
+        'learning_rate': 0.001,
+        'embedding_size': 64,
 
-        # System
-        'seed': CONFIG['random_seed'],
+        'metrics': ['Recall', 'Precision', 'NDCG', 'Hit', 'MRR', 'MAP'],
+        'topk': [5, 10, 20],
+
+        'seed': 42,
         'reproducibility': True,
-        'show_progress': False,
+
         'save_dataset': False,
-        'save_dataloaders': False
+        'save_dataloaders': False,
+        'show_progress': False,
     }
 
     if config_dict:
         base_config.update(config_dict)
 
-    # Create dataset and dataloaders
-    config = Config(model=model_type, dataset=temp_dataset_name, config_dict=base_config)
+    # -----------------------------------------------------------
+    # 2.3 Create dataset (TRAIN ONLY)
+    # -----------------------------------------------------------
+    config = Config(model=model_type, dataset=tmp_dataset, config_dict=base_config)
     dataset = create_dataset(config)
-    train_data, valid_data, test_data = data_preparation(config, dataset)
 
-    # Train model
-    model = get_model(config['model'])(config, train_data.dataset).to(config['device'])
-    trainer = get_trainer(config['MODEL_TYPE'], config['model'])(config, model)
+    # -----------------------------------------------------------
+    # 2.4 Build train data only
+    # -----------------------------------------------------------
+    train_data, _, _ = data_preparation(config, dataset)
 
-    best_valid_score, best_valid_result = trainer.fit(
-        train_data, valid_data, saved=False, show_progress=False
-    )
+    # -----------------------------------------------------------
+    # 2.5 Build model + trainer
+    # -----------------------------------------------------------
+    model_class = get_model(model_type)
+    model = model_class(config, train_data.dataset).to(config['device'])
 
-    return model, config, trainer, dataset, test_data
+    trainer_class = get_trainer(config['MODEL_TYPE'], model_type)
+    trainer = trainer_class(config, model)
 
+    trainer.fit(train_data, valid_data=None, saved=False, show_progress=False)
+
+    # -----------------------------------------------------------
+    # 2.6 Build MANUAL test dataset (NO LEAKAGE)
+    # -----------------------------------------------------------
+    # Build manual test loader
+    test_data_loader = build_test_dataloader_from_df(global_test_df, dataset, config)
+
+
+    return model, config, trainer, dataset, test_data_loader
 
 def evaluate_model(model, config, trainer, test_data_loader, k=10):
     """
@@ -336,20 +387,23 @@ def evaluate_model(model, config, trainer, test_data_loader, k=10):
     --------
     tuple : (precision, ndcg, map_at_k)
     """
-    test_result = trainer.evaluate(
+
+    result = trainer.evaluate(
         test_data_loader,
+        model=model,                
         load_best_model=False,
         show_progress=False
     )
 
-    if test_result is None:
+    if not result:
         return 0.0, 0.0, 0.0
 
-    precision = test_result.get(f'precision@{k}', 0.0)
-    ndcg = test_result.get(f'ndcg@{k}', 0.0)
-    map_at_k = test_result.get(f'map@{k}', 0.0)
+    precision = result.get(f'precision@{k}', 0.0)
+    ndcg = result.get(f'ndcg@{k}', 0.0)
+    map_k = result.get(f'map@{k}', 0.0)
 
-    return precision, ndcg, map_at_k
+    return precision, ndcg, map_k
+
 
 
 # =============================================================================
