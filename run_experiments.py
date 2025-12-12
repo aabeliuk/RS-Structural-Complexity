@@ -677,7 +677,9 @@ def run_single_experiment(train_sample_df, global_test_df, algorithm, strategy,
         }
 
     except Exception as e:
+        import traceback
         print(f"      ERROR: {str(e)}")
+        print(f"      Traceback: {traceback.format_exc()}")
         return {
             'sampling_rate': sampling_rate,
             'strategy': strategy,
@@ -749,11 +751,16 @@ def stratified_per_user_sample(global_train_df, per_user_difficulty,
         selected = available_indices[:n_samples]
         sampled_indices.extend(selected)
 
+    # Validate: check that all sampled indices exist in global_train_df
+    valid_indices = global_train_df.index
+    sampled_indices = [idx for idx in sampled_indices if idx in valid_indices]
+
+    if len(sampled_indices) == 0:
+        raise ValueError("No valid indices after sampling!")
+
     # Create sampled dataframe and shuffle
-    sampled_df = global_train_df.loc[sampled_indices].sample(
-        frac=1,
-        random_state=CONFIG['random_seed']
-    )
+    sampled_df = global_train_df.loc[sampled_indices].copy()
+    sampled_df = sampled_df.sample(frac=1, random_state=CONFIG['random_seed'])
 
     return sampled_df
 
