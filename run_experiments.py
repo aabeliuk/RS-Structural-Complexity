@@ -45,15 +45,15 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 CONFIG = {
     # Datasets to process
     'datasets': [
-        # 'Amazon_Health_and_Personal_Care',
+        'Amazon_Health_and_Personal_Care',
         # 'Amazon_Grocery_and_Gourmet_Food',
-        'book-crossing',
-        'lastfm',
-        'ModCloth',
-        'pinterest',
-        'RateBeer',
-        'steam',
-        'yelp2022'
+        # 'book-crossing',
+        # 'lastfm',
+        # 'ModCloth',
+        # 'pinterest',
+        # 'RateBeer',
+        # 'steam',
+        # 'yelp2022'
     ],
 
     # RS Algorithms to test
@@ -177,13 +177,9 @@ def save_recbole_format(df, dataset_name, output_path='dataset/'):
     if 'timestamp' in df_export.columns and pd.api.types.is_datetime64_any_dtype(df_export['timestamp']):
         df_export['timestamp'] = df_export['timestamp'].astype('int64') // 10**9
 
-    if df_export['user_id'].dtype == 'object':
-        user_map = {old_id: new_id for new_id, old_id in enumerate(df_export['user_id'].unique())}
-        df_export['user_id'] = df_export['user_id'].map(user_map)
-
-    if df_export['item_id'].dtype == 'object':
-        item_map = {old_id: new_id for new_id, old_id in enumerate(df_export['item_id'].unique())}
-        df_export['item_id'] = df_export['item_id'].map(item_map)
+    # FIXED: Don't convert tokens to integers - keep original tokens
+    # This ensures token consistency between train and test data
+    # RecBole can handle string tokens directly
 
     with open(inter_file, 'w') as f:
         header_cols = ['user_id:token', 'item_id:token', 'rating:float']
@@ -254,20 +250,48 @@ def build_test_dataloader_from_df(test_df, dataset, config):
     uid_map = dataset.field2id_token['user_id']
     iid_map = dataset.field2id_token['item_id']
 
-    # Filter out unknown users/items
-    df = test_df[
-        test_df['user_id'].isin(uid_map) &
-        test_df['item_id'].isin(iid_map)
-    ].copy()
+    # FIXED: Don't filter again - test_df is already filtered in run_single_experiment
+    # Just map the tokens to IDs
+    df = test_df.copy()
 
-    df['user_id'] = df['user_id'].map(uid_map)
-    df['item_id'] = df['item_id'].map(iid_map)
+    # Handle both dict and array-like mappings
+    if isinstance(uid_map, dict):
+        df['user_id'] = df['user_id'].map(uid_map)
+        df['item_id'] = df['item_id'].map(iid_map)
+    else:
+        # If it's an array/Series, create proper mapping
+        uid_to_id = {token: idx for idx, token in enumerate(uid_map) if token is not None}
+        iid_to_id = {token: idx for idx, token in enumerate(iid_map) if token is not None}
 
-    # Create RecBole Interaction object
-    interaction = Interaction({
-        'user_id': df['user_id'].values,
-        'item_id': df['item_id'].values
-    })
+        df['user_id'] = df['user_id'].map(uid_to_id)
+        df['item_id'] = df['item_id'].map(iid_to_id)
+
+    # Drop any rows with unmappable tokens (NaN values)
+    df = df.dropna(subset=['user_id', 'item_id'])
+
+    # Convert to integer type (RecBole expects int, not float)
+    df['user_id'] = df['user_id'].astype(int)
+    df['item_id'] = df['item_id'].astype(int)
+
+    if len(df) == 0:
+        raise ValueError(
+            f"No test samples remain after token mapping! "
+            f"Input had {len(test_df)} samples. "
+            f"All tokens failed to map - this suggests a data format issue."
+        )
+
+    # Create RecBole Interaction object with dataset context
+    # Create interaction dict with proper field names
+    interaction_dict = {
+        config['USER_ID_FIELD']: torch.tensor(df['user_id'].values, dtype=torch.long),
+        config['ITEM_ID_FIELD']: torch.tensor(df['item_id'].values, dtype=torch.long)
+    }
+
+    interaction = Interaction(interaction_dict)
+
+    # Manually set required attributes for FullSortEvalDataLoader
+    # used_ids tracks which items each user has interacted with (from training data)
+    interaction.used_ids = {}
 
     # Build FullSortEvalDataLoader
     test_loader = FullSortEvalDataLoader(
@@ -282,18 +306,24 @@ def build_test_dataloader_from_df(test_df, dataset, config):
 
 def train_model_with_fixed_test(train_df, global_test_df, model_type='BPR', config_dict=None):
     """
-    Train a RecBole model using ONLY `train_df`.
-    Evaluate later on a manually built test loader using `global_test_df`.
-    
+    Train a RecBole model using `train_df` and evaluate on `global_test_df`.
+    Uses RecBole's standard data preparation with manual split ratios.
+
     Returns:
         model, config, trainer, dataset, test_data_loader
     """
 
     # -----------------------------------------------------------
-    # 2.1 Save ONLY the training DF (NO TEST DF!)
+    # 2.1 Save BOTH train and test to RecBole format
     # -----------------------------------------------------------
     tmp_dataset = "temp_train"
-    save_recbole_format(train_df, tmp_dataset)
+
+    # Combine train and test for RecBole
+    combined_df = pd.concat([train_df, global_test_df], ignore_index=True)
+    save_recbole_format(combined_df, tmp_dataset)
+
+    n_train = len(train_df)
+    n_test = len(global_test_df)
 
     # -----------------------------------------------------------
     # 2.2 Base RecBole configuration
@@ -310,12 +340,11 @@ def train_model_with_fixed_test(train_df, global_test_df, model_type='BPR', conf
         'TIME_FIELD': 'timestamp',
         'load_col': {'inter': ['user_id', 'item_id', 'rating', 'timestamp']},
 
-        # ↓↓↓ IMPORTANT ↓↓↓
-        # Disable RecBole's internal splitting.
+        # Use exact split ratios for train/test
         'eval_args': {
-            'split': {'RS': [1.0, 0.0, 0.0]},
+            'split': {'RS': [n_train, 0, n_test]},
             'mode': 'full',
-            'order': 'RO'
+            'order': 'RO'  # Respect order (train first, then test)
         },
 
         # Performance settings
@@ -340,18 +369,16 @@ def train_model_with_fixed_test(train_df, global_test_df, model_type='BPR', conf
         base_config.update(config_dict)
 
     # -----------------------------------------------------------
-    # 2.3 Create dataset (TRAIN ONLY)
+    # 2.3 Create dataset and data loaders
     # -----------------------------------------------------------
     config = Config(model=model_type, dataset=tmp_dataset, config_dict=base_config)
     dataset = create_dataset(config)
 
-    # -----------------------------------------------------------
-    # 2.4 Build train data only
-    # -----------------------------------------------------------
-    train_data, _, _ = data_preparation(config, dataset)
+    # Use RecBole's standard data preparation
+    train_data, valid_data, test_data = data_preparation(config, dataset)
 
     # -----------------------------------------------------------
-    # 2.5 Build model + trainer
+    # 2.4 Build model + trainer
     # -----------------------------------------------------------
     model_class = get_model(model_type)
     model = model_class(config, train_data.dataset).to(config['device'])
@@ -359,16 +386,10 @@ def train_model_with_fixed_test(train_df, global_test_df, model_type='BPR', conf
     trainer_class = get_trainer(config['MODEL_TYPE'], model_type)
     trainer = trainer_class(config, model)
 
+    # Train on training data only (no validation)
     trainer.fit(train_data, valid_data=None, saved=False, show_progress=False)
 
-    # -----------------------------------------------------------
-    # 2.6 Build MANUAL test dataset (NO LEAKAGE)
-    # -----------------------------------------------------------
-    # Build manual test loader
-    test_data_loader = build_test_dataloader_from_df(global_test_df, dataset, config)
-
-
-    return model, config, trainer, dataset, test_data_loader
+    return model, config, trainer, dataset, test_data
 
 def evaluate_model(model, config, trainer, test_data_loader, k=10):
     """
@@ -390,7 +411,6 @@ def evaluate_model(model, config, trainer, test_data_loader, k=10):
 
     result = trainer.evaluate(
         test_data_loader,
-        model=model,                
         load_best_model=False,
         show_progress=False
     )
@@ -594,9 +614,32 @@ def run_single_experiment(train_sample_df, global_test_df, algorithm, strategy,
     dict : Result dictionary with metrics
     """
     try:
+        # CRITICAL FIX: Filter test set to only include users/items in training sample
+        # This prevents empty test sets when training on small samples
+        train_users = set(train_sample_df['user_id'].unique())
+        train_items = set(train_sample_df['item_id'].unique())
+
+        filtered_test_df = global_test_df[
+            global_test_df['user_id'].isin(train_users) &
+            global_test_df['item_id'].isin(train_items)
+        ]
+
+        # Check if we have any test samples
+        if len(filtered_test_df) == 0:
+            print(f"      WARNING: No valid test samples after filtering")
+            return {
+                'sampling_rate': sampling_rate,
+                'strategy': strategy,
+                'precision': 0.0,
+                'ndcg': 0.0,
+                'map': 0.0,
+                'n_ratings': n_ratings,
+                'status': 'no_test_data'
+            }
+
         # Train model
         model, config, trainer, dataset, test_data = train_model_with_fixed_test(
-            train_sample_df, global_test_df, model_type=algorithm
+            train_sample_df, filtered_test_df, model_type=algorithm
         )
 
         # Evaluate
@@ -1069,33 +1112,42 @@ def plot_aggregated_comparison(results_df):
         print(f"    Saved aggregated RPA plot: {filepath}")
 
     # Plot 2: Heatmap showing best strategy at 50% sampling
-    fig, ax = plt.subplots(figsize=(12, 6))
-
     # Filter for 50% sampling
     data_50 = results_df[results_df['sampling_rate'] == 50]
 
-    # Pivot for heatmap (NDCG as metric)
-    heatmap_data = data_50.pivot_table(
-        index='dataset',
-        columns='algorithm',
-        values='ndcg',
-        aggfunc='max'
-    )
+    # Only create heatmap if we have data at 50% sampling
+    if len(data_50) > 0:
+        fig, ax = plt.subplots(figsize=(12, 6))
 
-    sns.heatmap(heatmap_data, annot=True, fmt='.4f', cmap='YlOrRd',
-                ax=ax, cbar_kws={'label': f'NDCG@{CONFIG["eval_k"]}'})
-    ax.set_title(f'Best NDCG@{CONFIG["eval_k"]} at 50% Sampling (by Dataset × Algorithm)',
-                 fontsize=14, fontweight='bold')
-    ax.set_xlabel('Algorithm', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Dataset', fontsize=12, fontweight='bold')
+        # Pivot for heatmap (NDCG as metric)
+        heatmap_data = data_50.pivot_table(
+            index='dataset',
+            columns='algorithm',
+            values='ndcg',
+            aggfunc='max'
+        )
 
-    plt.tight_layout()
+        # Check if heatmap_data is not empty
+        if not heatmap_data.empty and heatmap_data.size > 0:
+            sns.heatmap(heatmap_data, annot=True, fmt='.4f', cmap='YlOrRd',
+                        ax=ax, cbar_kws={'label': f'NDCG@{CONFIG["eval_k"]}'})
+            ax.set_title(f'Best NDCG@{CONFIG["eval_k"]} at 50% Sampling (by Dataset × Algorithm)',
+                         fontsize=14, fontweight='bold')
+            ax.set_xlabel('Algorithm', fontsize=12, fontweight='bold')
+            ax.set_ylabel('Dataset', fontsize=12, fontweight='bold')
 
-    filepath = os.path.join(CONFIG['plots_dir'], 'heatmap_50pct_sampling.png')
-    plt.savefig(filepath, dpi=300, bbox_inches='tight')
-    plt.close()
+            plt.tight_layout()
 
-    print(f"  Saved heatmap plot: {filepath}")
+            filepath = os.path.join(CONFIG['plots_dir'], 'heatmap_50pct_sampling.png')
+            plt.savefig(filepath, dpi=300, bbox_inches='tight')
+            plt.close()
+
+            print(f"  Saved heatmap plot: {filepath}")
+        else:
+            print(f"  Skipping heatmap (no valid data at 50% sampling)")
+            plt.close()
+    else:
+        print(f"  Skipping heatmap (no experiments at 50% sampling rate)")
 
 
 # =============================================================================
