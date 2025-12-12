@@ -1,1 +1,6 @@
 /dataset
+/log_tensorboard
+/plots
+/__pycache__
+/cache
+/results
