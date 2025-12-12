@@ -329,6 +329,14 @@ def train_model_with_fixed_test(train_df, global_test_df, model_type='BPR', conf
     n_train = len(train_df)
     n_test = len(global_test_df)
 
+    # Calculate number of items to adjust topk dynamically
+    n_items = train_df['item_id'].nunique()
+    # Adjust topk to avoid "index k out of range" errors
+    max_k = max(1, n_items - 1)  # At least 1, at most n_items-1
+    topk_values = [k for k in [5, 10, 20] if k <= max_k]
+    if not topk_values:
+        topk_values = [max_k]  # Use max available if all standard values are too large
+
     # -----------------------------------------------------------
     # 2.2 Base RecBole configuration
     # -----------------------------------------------------------
@@ -359,7 +367,7 @@ def train_model_with_fixed_test(train_df, global_test_df, model_type='BPR', conf
         'embedding_size': 64,
 
         'metrics': ['Recall', 'Precision', 'NDCG', 'Hit', 'MRR', 'MAP'],
-        'topk': [5, 10, 20],
+        'topk': topk_values,  # Dynamically adjusted based on n_items
 
         'seed': 42,
         'reproducibility': True,
@@ -422,9 +430,16 @@ def evaluate_model(model, config, trainer, test_data_loader, k=10):
     if not result:
         return 0.0, 0.0, 0.0
 
-    precision = result.get(f'precision@{k}', 0.0)
-    ndcg = result.get(f'ndcg@{k}', 0.0)
-    map_k = result.get(f'map@{k}', 0.0)
+    # Use the largest available k if requested k is not available
+    available_k = k
+    if f'precision@{k}' not in result:
+        # Find the largest k that was actually computed
+        topk_values = config['topk']
+        available_k = max([k_val for k_val in topk_values if k_val <= k], default=topk_values[-1] if topk_values else 1)
+
+    precision = result.get(f'precision@{available_k}', 0.0)
+    ndcg = result.get(f'ndcg@{available_k}', 0.0)
+    map_k = result.get(f'map@{available_k}', 0.0)
 
     return precision, ndcg, map_k
 
