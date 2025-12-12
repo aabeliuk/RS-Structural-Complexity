@@ -737,7 +737,15 @@ def stratified_per_user_sample(global_train_df, per_user_difficulty,
         else:
             raise ValueError(f"Unknown strategy: {strategy}")
 
-        # Take top n_samples indices for this user
+        # Handle edge case: user has no difficulty scores computed
+        if len(available_indices) == 0:
+            # Fallback: randomly sample from user's actual ratings
+            user_mask = global_train_df['user_id'] == user_id
+            user_all_indices = global_train_df[user_mask].index.to_numpy()
+            available_indices = np.random.permutation(user_all_indices)
+
+        # Take top n_samples indices for this user (limit to available)
+        n_samples = min(n_samples, len(available_indices))
         selected = available_indices[:n_samples]
         sampled_indices.extend(selected)
 
