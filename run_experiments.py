@@ -45,7 +45,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 CONFIG = {
     # Datasets to process
     'datasets': [
-        'Amazon_Health_and_Personal_Care',
+        'Amazon_Health_and_Personal_Care',  # Test with just one dataset first
         # 'Amazon_Grocery_and_Gourmet_Food',
         # 'book-crossing',
         # 'lastfm',
@@ -62,13 +62,14 @@ CONFIG = {
 
     # Sampling rates to test (%)
     # 'sampling_rates': [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
-    'sampling_rates': [10, 40, 70 , 100],
+    'sampling_rates': [10, 100],  # Test with just 10% and 100%
 
     # Sampling strategies
     'strategies': ['difficult', 'random', 'difficult_inverse'],
 
     # Experiment parameters
-    'min_ratings': 6,        # Minimum ratings per user/item
+    'min_ratings': 10,        # Minimum ratings per user/item
+    'min_total_ratings_per_user': 3,  # Minimum total interactions per user (for stratified sampling)
     'max_users': 100000,     # Maximum users to keep
     'max_items': 100000,     # Maximum items to keep
     'n_partitions': 10,      # Partitions for perturbation analysis
@@ -101,7 +102,7 @@ def setup_directories():
     print("Output directories created/verified.")
 
 
-def preprocess_data(df, min_r=10, max_n=100000):
+def preprocess_data(df, min_r=10, max_n=100000, min_total_ratings=3):
     """
     Preprocess dataset by filtering and subsampling users and items.
 
@@ -113,6 +114,8 @@ def preprocess_data(df, min_r=10, max_n=100000):
         Minimum number of ratings per user/item
     max_n : int
         Maximum number of users/items to keep
+    min_total_ratings : int
+        Minimum total interactions per user (for stratified per-user sampling)
 
     Returns:
     --------
@@ -127,9 +130,10 @@ def preprocess_data(df, min_r=10, max_n=100000):
         sort_cols.append('timestamp')
     df = df.sort_values(by=sort_cols)
 
-    # Filter users with minimum ratings
+    # Filter users with minimum ratings (ensure compatibility with stratified sampling)
     user_ratings_count = df['user_id'].value_counts()
-    valid_users = user_ratings_count[user_ratings_count >= min_r].index
+    min_required = max(min_r, min_total_ratings)
+    valid_users = user_ratings_count[user_ratings_count >= min_required].index
     df_filtered = df[df['user_id'].isin(valid_users)]
 
     # Filter items with minimum ratings
@@ -458,7 +462,7 @@ def compute_difficult_ratings(df, dataset_name, force_recompute=False):
         'item_map': mapping from item_id to matrix column index
     }
     """
-    cache_file = os.path.join(CONFIG['cache_dir'], f'difficult_ratings_{dataset_name}.pkl')
+    cache_file = os.path.join(CONFIG['cache_dir'], f'difficult_ratings_{dataset_name}_v2_per_user.pkl')
 
     # Check cache
     if not force_recompute and os.path.exists(cache_file):
@@ -469,38 +473,15 @@ def compute_difficult_ratings(df, dataset_name, force_recompute=False):
     print(f"  Computing difficult ratings for {dataset_name}...")
     print(f"    This may take several minutes...")
 
-    # Split into train/test
+    # Split into train/test using leave-one-out
     train_df, test_df = temporal_holdout_split(df, leave_n_out=1)
 
-    # Create global train/test split (90/10)
-    n_total = len(train_df)
+    # Use ALL remaining data for training (no 90/10 split)
+    global_train_df = train_df
+    global_test_df = test_df
 
-    # Sort by timestamp to maintain temporal ordering
-    if 'timestamp' in train_df.columns:
-        train_df_sorted = train_df.sort_values(['user_id', 'timestamp'])
-    else:
-        train_df_sorted = train_df.sort_values(['user_id'])
-
-    # Split by user to ensure each user appears in both sets
-    global_train_list = []
-    global_test_list = []
-
-    for user_id, group in train_df_sorted.groupby('user_id'):
-        n_user_ratings = len(group)
-        n_train = max(1, int(n_user_ratings * 0.9))
-
-        user_train = group.iloc[:n_train]
-        user_test = group.iloc[n_train:]
-
-        global_train_list.append(user_train)
-        if len(user_test) > 0:
-            global_test_list.append(user_test)
-
-    global_train_df = pd.concat(global_train_list, ignore_index=False)
-    global_test_df = pd.concat(global_test_list, ignore_index=False)
-
-    print(f"    Global train: {len(global_train_df):,} ratings")
-    print(f"    Global test: {len(global_test_df):,} ratings")
+    print(f"    Training set: {len(global_train_df):,} ratings")
+    print(f"    Test set (leave-1-out): {len(global_test_df):,} ratings")
 
     # Create partitions
     all_indices = global_train_df.index.to_numpy()
@@ -566,11 +547,44 @@ def compute_difficult_ratings(df, dataset_name, force_recompute=False):
     print(f"      Max error: {errors_sorted.max():.4f}")
     print(f"      Min error: {errors_sorted.min():.4f}")
 
+    # Organize difficulty scores by user (for stratified per-user sampling)
+    print(f"    Organizing per-user difficulty rankings...")
+    per_user_difficulty = {}
+
+    for user_id in global_train_df['user_id'].unique():
+        # Get this user's rating indices
+        user_mask = global_train_df['user_id'] == user_id
+        user_indices = global_train_df[user_mask].index.to_numpy()
+
+        # Extract their difficulty scores
+        user_errors = {
+            idx: squared_errors[idx]
+            for idx in user_indices
+            if idx in squared_errors
+        }
+
+        # Sort by difficulty (descending = hardest first)
+        user_indices_sorted = np.array(sorted(
+            user_errors.keys(),
+            key=lambda x: user_errors[x],
+            reverse=True
+        ))
+
+        # Inverted (ascending = easiest first)
+        user_indices_sorted_inverted = user_indices_sorted[::-1]
+
+        per_user_difficulty[user_id] = {
+            'indices_sorted': user_indices_sorted,
+            'indices_sorted_inverted': user_indices_sorted_inverted,
+            'squared_errors': user_errors,
+            'n_ratings': len(user_indices)
+        }
+
+    print(f"    Organized {len(per_user_difficulty)} users")
+
     # Package results
     result = {
-        'indices_sorted': indices_sorted,
-        'indices_sorted_inverted': indices_sorted_inverted,
-        'squared_errors': squared_errors,
+        'per_user_difficulty': per_user_difficulty,  # NEW: Per-user rankings
         'global_train_df': global_train_df,
         'global_test_df': global_test_df,
         'user_map': user_map,
@@ -676,6 +690,66 @@ def run_single_experiment(train_sample_df, global_test_df, algorithm, strategy,
         }
 
 
+def stratified_per_user_sample(global_train_df, per_user_difficulty,
+                               sampling_rate, strategy='difficult'):
+    """
+    Sample ratings using stratified per-user sampling.
+
+    Ensures:
+    - Each user contributes X% of their ratings
+    - Minimum 1 rating per user (even at low sampling rates)
+    - Strategy (difficult/random/easy) applied per-user
+
+    Parameters:
+    -----------
+    global_train_df : pd.DataFrame
+        All available training data
+    per_user_difficulty : dict
+        Per-user difficulty rankings from compute_difficult_ratings()
+        Structure: {user_id: {'indices_sorted': array, 'n_ratings': int, ...}}
+    sampling_rate : int
+        Percentage to sample (0-100)
+    strategy : str
+        'difficult', 'random', or 'difficult_inverse'
+
+    Returns:
+    --------
+    pd.DataFrame : Sampled training data, shuffled
+    """
+    sampled_indices = []
+
+    for user_id, user_data in per_user_difficulty.items():
+        n_user_ratings = user_data['n_ratings']
+
+        # Guarantee at least 1 rating per user
+        n_samples = max(1, int(n_user_ratings * sampling_rate / 100))
+
+        # Get indices based on strategy
+        if strategy == 'difficult':
+            # Hardest ratings first
+            available_indices = user_data['indices_sorted']
+        elif strategy == 'difficult_inverse':
+            # Easiest ratings first
+            available_indices = user_data['indices_sorted_inverted']
+        elif strategy == 'random':
+            # Random order (shuffle the sorted indices)
+            available_indices = np.random.permutation(user_data['indices_sorted'])
+        else:
+            raise ValueError(f"Unknown strategy: {strategy}")
+
+        # Take top n_samples indices for this user
+        selected = available_indices[:n_samples]
+        sampled_indices.extend(selected)
+
+    # Create sampled dataframe and shuffle
+    sampled_df = global_train_df.loc[sampled_indices].sample(
+        frac=1,
+        random_state=CONFIG['random_seed']
+    )
+
+    return sampled_df
+
+
 def run_experiments_for_dataset(dataset_name, algorithm, difficult_data):
     """
     Run all experiments for one dataset and one algorithm.
@@ -695,60 +769,62 @@ def run_experiments_for_dataset(dataset_name, algorithm, difficult_data):
     """
     results = []
 
+    # Extract data structures (updated for per-user sampling)
     global_train_df = difficult_data['global_train_df']
     global_test_df = difficult_data['global_test_df']
-    indices_sorted = difficult_data['indices_sorted']
-    indices_sorted_inverted = difficult_data['indices_sorted_inverted']
-    global_train_indices = set(global_train_df.index)
-
-    # Filter indices to only those in global_train_df
-    indices_sorted_filtered = [idx for idx in indices_sorted
-                              if idx in global_train_indices]
-    indices_sorted_inverted_filtered = [idx for idx in indices_sorted_inverted
-                                       if idx in global_train_indices]
+    per_user_difficulty = difficult_data['per_user_difficulty']
 
     for sampling_rate in CONFIG['sampling_rates']:
-        n_samples = int(len(global_train_df) * sampling_rate / 100)
-        print(f"    Sampling rate: {sampling_rate}% ({n_samples:,} ratings)")
+        # Calculate expected total samples (for reporting)
+        total_samples = sum(
+            max(1, int(user_data['n_ratings'] * sampling_rate / 100))
+            for user_data in per_user_difficulty.values()
+        )
 
-        # Strategy 1: DIFFICULT
-        print(f"      [1/3] Difficult sampling...", end=" ")
-        difficult_indices = indices_sorted_filtered[:n_samples]
-        difficult_df = global_train_df.loc[difficult_indices].sample(frac=1)
+        print(f"    Sampling rate: {sampling_rate}% (~{total_samples:,} ratings)")
+
+        # Strategy 1: DIFFICULT (per-user)
+        print(f"      [1/3] Per-user difficult sampling...", end=" ")
+        difficult_df = stratified_per_user_sample(
+            global_train_df, per_user_difficulty,
+            sampling_rate, strategy='difficult'
+        )
 
         result = run_single_experiment(
             difficult_df, global_test_df, algorithm,
-            'difficult', sampling_rate, n_samples
+            'difficult', sampling_rate, len(difficult_df)
         )
         result['dataset'] = dataset_name
         result['algorithm'] = algorithm
         results.append(result)
         print(f"P@{CONFIG['eval_k']}={result['precision']:.4f}")
 
-        # Strategy 2: RANDOM
-        print(f"      [2/3] Random sampling...", end=" ")
-        random_indices = np.random.choice(
-            global_train_df.index, size=n_samples, replace=False
+        # Strategy 2: RANDOM (per-user)
+        print(f"      [2/3] Per-user random sampling...", end=" ")
+        random_df = stratified_per_user_sample(
+            global_train_df, per_user_difficulty,
+            sampling_rate, strategy='random'
         )
-        random_df = global_train_df.loc[random_indices].sample(frac=1)
 
         result = run_single_experiment(
             random_df, global_test_df, algorithm,
-            'random', sampling_rate, n_samples
+            'random', sampling_rate, len(random_df)
         )
         result['dataset'] = dataset_name
         result['algorithm'] = algorithm
         results.append(result)
         print(f"P@{CONFIG['eval_k']}={result['precision']:.4f}")
 
-        # Strategy 3: DIFFICULT INVERSE (easiest)
-        print(f"      [3/3] Easiest sampling...", end=" ")
-        easy_indices = indices_sorted_inverted_filtered[:n_samples]
-        easy_df = global_train_df.loc[easy_indices].sample(frac=1)
+        # Strategy 3: EASY (per-user)
+        print(f"      [3/3] Per-user easiest sampling...", end=" ")
+        easy_df = stratified_per_user_sample(
+            global_train_df, per_user_difficulty,
+            sampling_rate, strategy='difficult_inverse'
+        )
 
         result = run_single_experiment(
             easy_df, global_test_df, algorithm,
-            'difficult_inverse', sampling_rate, n_samples
+            'difficult_inverse', sampling_rate, len(easy_df)
         )
         result['dataset'] = dataset_name
         result['algorithm'] = algorithm
@@ -1302,7 +1378,12 @@ def main():
 
         # Preprocess
         print(f"Preprocessing...")
-        df = preprocess_data(df, min_r=CONFIG['min_ratings'], max_n=CONFIG['max_users'])
+        df = preprocess_data(
+            df,
+            min_r=CONFIG['min_ratings'],
+            max_n=CONFIG['max_users'],
+            min_total_ratings=CONFIG['min_total_ratings_per_user']
+        )
 
         n_users = df['user_id'].nunique()
         n_items = df['item_id'].nunique()
