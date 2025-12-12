@@ -914,95 +914,105 @@ def plot_rpa(results_df, dataset_name, algorithm):
 
 def plot_aggregated_comparison(results_df):
     """
-    Generate aggregated comparison plots across datasets and algorithms.
+    Generate aggregated comparison plots across datasets (one plot per algorithm).
 
     Parameters:
     -----------
     results_df : pd.DataFrame
         All results with RPA columns
     """
-    # Plot 1: Average RPA across datasets for each strategy
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-
     color_difficult = '#E63946'
     color_random = '#457B9D'
     color_easy = '#1EC423'
 
-    # Exclude 100% sampling rate
-    data = results_df[results_df['sampling_rate'] != 100]
+    # Get unique algorithms
+    algorithms = results_df['algorithm'].unique()
 
-    # Group by strategy and sampling rate, average across datasets and algorithms
-    avg_rpa = data.groupby(['strategy', 'sampling_rate']).agg({
-        'precision_rpa': 'mean',
-        'ndcg_rpa': 'mean',
-        'map_rpa': 'mean'
-    }).reset_index()
+    # Create one aggregated plot per algorithm
+    for algorithm in algorithms:
+        print(f"  Creating aggregated plot for {algorithm}...")
 
-    difficult_avg = avg_rpa[avg_rpa['strategy'] == 'difficult'].sort_values('sampling_rate')
-    random_avg = avg_rpa[avg_rpa['strategy'] == 'random'].sort_values('sampling_rate')
-    easy_avg = avg_rpa[avg_rpa['strategy'] == 'difficult_inverse'].sort_values('sampling_rate')
+        # Filter data for this algorithm
+        algo_data = results_df[results_df['algorithm'] == algorithm]
 
-    # Precision RPA
-    axes[0].plot(difficult_avg['sampling_rate'], difficult_avg['precision_rpa'],
-                 marker='o', linewidth=2.5, markersize=8,
-                 color=color_difficult, label='Difficult', linestyle='-')
-    axes[0].plot(random_avg['sampling_rate'], random_avg['precision_rpa'],
-                 marker='s', linewidth=2.5, markersize=8,
-                 color=color_random, label='Random', linestyle='--')
-    axes[0].plot(easy_avg['sampling_rate'], easy_avg['precision_rpa'],
-                 marker='^', linewidth=2.5, markersize=8,
-                 color=color_easy, label='Easiest', linestyle=':')
-    axes[0].axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
-    axes[0].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
-    axes[0].set_ylabel('Average RPA (%)', fontsize=12, fontweight='bold')
-    axes[0].set_title(f'Precision@{CONFIG["eval_k"]} - Average RPA', fontsize=14, fontweight='bold')
-    axes[0].grid(True, alpha=0.3, linestyle='--')
-    axes[0].legend(fontsize=11, loc='best')
+        # Plot 1: Average RPA across datasets for each strategy
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
-    # NDCG RPA
-    axes[1].plot(difficult_avg['sampling_rate'], difficult_avg['ndcg_rpa'],
-                 marker='o', linewidth=2.5, markersize=8,
-                 color=color_difficult, label='Difficult', linestyle='-')
-    axes[1].plot(random_avg['sampling_rate'], random_avg['ndcg_rpa'],
-                 marker='s', linewidth=2.5, markersize=8,
-                 color=color_random, label='Random', linestyle='--')
-    axes[1].plot(easy_avg['sampling_rate'], easy_avg['ndcg_rpa'],
-                 marker='^', linewidth=2.5, markersize=8,
-                 color=color_easy, label='Easiest', linestyle=':')
-    axes[1].axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
-    axes[1].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
-    axes[1].set_ylabel('Average RPA (%)', fontsize=12, fontweight='bold')
-    axes[1].set_title(f'NDCG@{CONFIG["eval_k"]} - Average RPA', fontsize=14, fontweight='bold')
-    axes[1].grid(True, alpha=0.3, linestyle='--')
-    axes[1].legend(fontsize=11, loc='best')
+        # Exclude 100% sampling rate
+        data = algo_data[algo_data['sampling_rate'] != 100]
 
-    # MAP RPA
-    axes[2].plot(difficult_avg['sampling_rate'], difficult_avg['map_rpa'],
-                 marker='o', linewidth=2.5, markersize=8,
-                 color=color_difficult, label='Difficult', linestyle='-')
-    axes[2].plot(random_avg['sampling_rate'], random_avg['map_rpa'],
-                 marker='s', linewidth=2.5, markersize=8,
-                 color=color_random, label='Random', linestyle='--')
-    axes[2].plot(easy_avg['sampling_rate'], easy_avg['map_rpa'],
-                 marker='^', linewidth=2.5, markersize=8,
-                 color=color_easy, label='Easiest', linestyle=':')
-    axes[2].axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
-    axes[2].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
-    axes[2].set_ylabel('Average RPA (%)', fontsize=12, fontweight='bold')
-    axes[2].set_title(f'MAP@{CONFIG["eval_k"]} - Average RPA', fontsize=14, fontweight='bold')
-    axes[2].grid(True, alpha=0.3, linestyle='--')
-    axes[2].legend(fontsize=11, loc='best')
+        # Group by strategy and sampling rate, average across datasets only
+        avg_rpa = data.groupby(['strategy', 'sampling_rate']).agg({
+            'precision_rpa': 'mean',
+            'ndcg_rpa': 'mean',
+            'map_rpa': 'mean'
+        }).reset_index()
 
-    plt.suptitle('Average Relative Performance Analysis Across All Datasets',
-                 fontsize=16, fontweight='bold', y=1.02)
-    plt.tight_layout()
+        difficult_avg = avg_rpa[avg_rpa['strategy'] == 'difficult'].sort_values('sampling_rate')
+        random_avg = avg_rpa[avg_rpa['strategy'] == 'random'].sort_values('sampling_rate')
+        easy_avg = avg_rpa[avg_rpa['strategy'] == 'difficult_inverse'].sort_values('sampling_rate')
 
-    # Save
-    filepath = os.path.join(CONFIG['plots_dir'], 'aggregated_rpa.png')
-    plt.savefig(filepath, dpi=300, bbox_inches='tight')
-    plt.close()
+        # Precision RPA
+        axes[0].plot(difficult_avg['sampling_rate'], difficult_avg['precision_rpa'],
+                     marker='o', linewidth=2.5, markersize=8,
+                     color=color_difficult, label='Difficult', linestyle='-')
+        axes[0].plot(random_avg['sampling_rate'], random_avg['precision_rpa'],
+                     marker='s', linewidth=2.5, markersize=8,
+                     color=color_random, label='Random', linestyle='--')
+        axes[0].plot(easy_avg['sampling_rate'], easy_avg['precision_rpa'],
+                     marker='^', linewidth=2.5, markersize=8,
+                     color=color_easy, label='Easiest', linestyle=':')
+        axes[0].axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+        axes[0].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
+        axes[0].set_ylabel('Average RPA (%)', fontsize=12, fontweight='bold')
+        axes[0].set_title(f'Precision@{CONFIG["eval_k"]} - Average RPA', fontsize=14, fontweight='bold')
+        axes[0].grid(True, alpha=0.3, linestyle='--')
+        axes[0].legend(fontsize=11, loc='best')
 
-    print(f"  Saved aggregated RPA plot: {filepath}")
+        # NDCG RPA
+        axes[1].plot(difficult_avg['sampling_rate'], difficult_avg['ndcg_rpa'],
+                     marker='o', linewidth=2.5, markersize=8,
+                     color=color_difficult, label='Difficult', linestyle='-')
+        axes[1].plot(random_avg['sampling_rate'], random_avg['ndcg_rpa'],
+                     marker='s', linewidth=2.5, markersize=8,
+                     color=color_random, label='Random', linestyle='--')
+        axes[1].plot(easy_avg['sampling_rate'], easy_avg['ndcg_rpa'],
+                     marker='^', linewidth=2.5, markersize=8,
+                     color=color_easy, label='Easiest', linestyle=':')
+        axes[1].axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+        axes[1].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
+        axes[1].set_ylabel('Average RPA (%)', fontsize=12, fontweight='bold')
+        axes[1].set_title(f'NDCG@{CONFIG["eval_k"]} - Average RPA', fontsize=14, fontweight='bold')
+        axes[1].grid(True, alpha=0.3, linestyle='--')
+        axes[1].legend(fontsize=11, loc='best')
+
+        # MAP RPA
+        axes[2].plot(difficult_avg['sampling_rate'], difficult_avg['map_rpa'],
+                     marker='o', linewidth=2.5, markersize=8,
+                     color=color_difficult, label='Difficult', linestyle='-')
+        axes[2].plot(random_avg['sampling_rate'], random_avg['map_rpa'],
+                     marker='s', linewidth=2.5, markersize=8,
+                     color=color_random, label='Random', linestyle='--')
+        axes[2].plot(easy_avg['sampling_rate'], easy_avg['map_rpa'],
+                     marker='^', linewidth=2.5, markersize=8,
+                     color=color_easy, label='Easiest', linestyle=':')
+        axes[2].axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+        axes[2].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
+        axes[2].set_ylabel('Average RPA (%)', fontsize=12, fontweight='bold')
+        axes[2].set_title(f'MAP@{CONFIG["eval_k"]} - Average RPA', fontsize=14, fontweight='bold')
+        axes[2].grid(True, alpha=0.3, linestyle='--')
+        axes[2].legend(fontsize=11, loc='best')
+
+        plt.suptitle(f'{algorithm} - Average RPA Across All Datasets',
+                     fontsize=16, fontweight='bold', y=1.02)
+        plt.tight_layout()
+
+        # Save (one file per algorithm)
+        filepath = os.path.join(CONFIG['plots_dir'], f'aggregated_rpa_{algorithm}.png')
+        plt.savefig(filepath, dpi=300, bbox_inches='tight')
+        plt.close()
+
+        print(f"    Saved aggregated RPA plot: {filepath}")
 
     # Plot 2: Heatmap showing best strategy at 50% sampling
     fig, ax = plt.subplots(figsize=(12, 6))
@@ -1090,6 +1100,7 @@ def load_all_results():
 def load_inter_file(dataset_name, data_path='dataset/'):
     """
     Load existing .inter file directly into a pandas DataFrame.
+    Handles both explicit (with ratings) and implicit (no ratings) feedback datasets.
 
     Parameters:
     -----------
@@ -1117,6 +1128,26 @@ def load_inter_file(dataset_name, data_path='dataset/'):
     df.columns = [col.split(':')[0] for col in df.columns]
 
     print(f"  Loaded {len(df):,} interactions")
+    print(f"  Columns: {list(df.columns)}")
+
+    # Handle implicit feedback datasets (no rating column)
+    if 'rating' not in df.columns:
+        print(f"  No rating column found - treating as implicit feedback (all ratings = 1.0)")
+        df['rating'] = 1.0
+
+    # Handle missing timestamp (use sequential order)
+    if 'timestamp' not in df.columns:
+        print(f"  No timestamp column found - using sequential order")
+        df['timestamp'] = range(len(df))
+
+    # Ensure rating is numeric
+    df['rating'] = pd.to_numeric(df['rating'], errors='coerce')
+
+    # Ensure we have all required columns
+    required_cols = ['user_id', 'item_id', 'rating', 'timestamp']
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required columns after processing: {missing_cols}")
 
     return df
 
