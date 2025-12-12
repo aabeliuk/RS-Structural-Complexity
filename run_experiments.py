@@ -65,7 +65,7 @@ CONFIG = {
     'sampling_rates': [10, 100],  # Test with just 10% and 100%
 
     # Sampling strategies
-    'strategies': ['difficult', 'random', 'difficult_inverse'],
+    'strategies': ['difficult', 'random', 'difficult_inverse', 'temporal'],
 
     # Experiment parameters
     'min_ratings': 10,        # Minimum ratings per user/item
@@ -751,6 +751,19 @@ def stratified_per_user_sample(global_train_df, per_user_difficulty,
         elif strategy == 'random':
             # Random order (shuffle the sorted indices)
             available_indices = np.random.permutation(user_data['indices_sorted'])
+        elif strategy == 'temporal':
+            # Sort user's ratings by timestamp (most recent first)
+            user_mask = global_train_df['user_id'] == user_id
+            user_ratings = global_train_df[user_mask].copy()
+
+            # Sort by timestamp descending (most recent first)
+            if 'timestamp' in user_ratings.columns:
+                user_ratings_sorted = user_ratings.sort_values('timestamp', ascending=False)
+            else:
+                # Fallback: use index order (assuming later indices = more recent)
+                user_ratings_sorted = user_ratings.sort_index(ascending=False)
+
+            available_indices = user_ratings_sorted.index.to_numpy()
         else:
             raise ValueError(f"Unknown strategy: {strategy}")
 
@@ -814,7 +827,7 @@ def run_experiments_for_dataset(dataset_name, algorithm, difficult_data):
         print(f"    Sampling rate: {sampling_rate}% (~{total_samples:,} ratings)")
 
         # Strategy 1: DIFFICULT (per-user)
-        print(f"      [1/3] Per-user difficult sampling...", end=" ")
+        print(f"      [1/4] Per-user difficult sampling...", end=" ")
         difficult_df = stratified_per_user_sample(
             global_train_df, per_user_difficulty,
             sampling_rate, strategy='difficult'
@@ -830,7 +843,7 @@ def run_experiments_for_dataset(dataset_name, algorithm, difficult_data):
         print(f"P@{CONFIG['eval_k']}={result['precision']:.4f}")
 
         # Strategy 2: RANDOM (per-user)
-        print(f"      [2/3] Per-user random sampling...", end=" ")
+        print(f"      [2/4] Per-user random sampling...", end=" ")
         random_df = stratified_per_user_sample(
             global_train_df, per_user_difficulty,
             sampling_rate, strategy='random'
@@ -846,7 +859,7 @@ def run_experiments_for_dataset(dataset_name, algorithm, difficult_data):
         print(f"P@{CONFIG['eval_k']}={result['precision']:.4f}")
 
         # Strategy 3: EASY (per-user)
-        print(f"      [3/3] Per-user easiest sampling...", end=" ")
+        print(f"      [3/4] Per-user easiest sampling...", end=" ")
         easy_df = stratified_per_user_sample(
             global_train_df, per_user_difficulty,
             sampling_rate, strategy='difficult_inverse'
@@ -855,6 +868,22 @@ def run_experiments_for_dataset(dataset_name, algorithm, difficult_data):
         result = run_single_experiment(
             easy_df, global_test_df, algorithm,
             'difficult_inverse', sampling_rate, len(easy_df)
+        )
+        result['dataset'] = dataset_name
+        result['algorithm'] = algorithm
+        results.append(result)
+        print(f"P@{CONFIG['eval_k']}={result['precision']:.4f}")
+
+        # Strategy 4: TEMPORAL (per-user)
+        print(f"      [4/4] Per-user temporal sampling...", end=" ")
+        temporal_df = stratified_per_user_sample(
+            global_train_df, per_user_difficulty,
+            sampling_rate, strategy='temporal'
+        )
+
+        result = run_single_experiment(
+            temporal_df, global_test_df, algorithm,
+            'temporal', sampling_rate, len(temporal_df)
         )
         result['dataset'] = dataset_name
         result['algorithm'] = algorithm
