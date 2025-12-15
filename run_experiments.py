@@ -566,10 +566,12 @@ def compute_difficult_ratings(df, dataset_name, force_recompute=False):
     print(f"    Organizing per-user difficulty rankings...")
     per_user_difficulty = {}
 
-    for user_id in global_train_df['user_id'].unique():
-        # Get this user's rating indices
-        user_mask = global_train_df['user_id'] == user_id
-        user_indices = global_train_df[user_mask].index.to_numpy()
+    # Group once instead of filtering repeatedly (much faster!)
+    grouped = global_train_df.groupby('user_id', sort=False)
+
+    for user_id, user_data in grouped:
+        # Get this user's rating indices (already filtered by groupby)
+        user_indices = user_data.index.to_numpy()
 
         # Extract their difficulty scores
         user_errors = {
