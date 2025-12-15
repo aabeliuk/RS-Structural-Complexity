@@ -477,7 +477,7 @@ def compute_difficult_ratings(df, dataset_name, force_recompute=False):
         'item_map': mapping from item_id to matrix column index
     }
     """
-    cache_file = os.path.join(CONFIG['cache_dir'], f'difficult_ratings_{dataset_name}_v2_per_user.pkl')
+    cache_file = os.path.join(CONFIG['cache_dir'], f'difficult_ratings_{dataset_name}_v3_per_user_temporal.pkl')
 
     # Check cache
     if not force_recompute and os.path.exists(cache_file):
@@ -590,9 +590,20 @@ def compute_difficult_ratings(df, dataset_name, force_recompute=False):
         # Inverted (ascending = easiest first)
         user_indices_sorted_inverted = user_indices_sorted[::-1]
 
+        # Sort by timestamp (descending = most recent first) for temporal strategy
+        # user_data is already grouped, so we can sort it directly
+        if 'timestamp' in user_data.columns:
+            user_data_temporal = user_data.sort_values('timestamp', ascending=False)
+        else:
+            # Fallback: use index order (assuming higher indices = more recent)
+            user_data_temporal = user_data.sort_index(ascending=False)
+
+        user_indices_sorted_temporal = user_data_temporal.index.to_numpy()
+
         per_user_difficulty[user_id] = {
             'indices_sorted': user_indices_sorted,
             'indices_sorted_inverted': user_indices_sorted_inverted,
+            'indices_sorted_temporal': user_indices_sorted_temporal,
             'squared_errors': user_errors,
             'n_ratings': len(user_indices)
         }
@@ -754,18 +765,8 @@ def stratified_per_user_sample(global_train_df, per_user_difficulty,
             # Random order (shuffle the sorted indices)
             available_indices = np.random.permutation(user_data['indices_sorted'])
         elif strategy == 'temporal':
-            # Sort user's ratings by timestamp (most recent first)
-            user_mask = global_train_df['user_id'] == user_id
-            user_ratings = global_train_df[user_mask].copy()
-
-            # Sort by timestamp descending (most recent first)
-            if 'timestamp' in user_ratings.columns:
-                user_ratings_sorted = user_ratings.sort_values('timestamp', ascending=False)
-            else:
-                # Fallback: use index order (assuming later indices = more recent)
-                user_ratings_sorted = user_ratings.sort_index(ascending=False)
-
-            available_indices = user_ratings_sorted.index.to_numpy()
+            # Most recent ratings first (pre-computed)
+            available_indices = user_data['indices_sorted_temporal']
         else:
             raise ValueError(f"Unknown strategy: {strategy}")
 
@@ -781,9 +782,9 @@ def stratified_per_user_sample(global_train_df, per_user_difficulty,
         selected = available_indices[:n_samples]
         sampled_indices.extend(selected)
 
-    # Validate: check that all sampled indices exist in global_train_df
-    valid_indices = global_train_df.index
-    sampled_indices = [idx for idx in sampled_indices if idx in valid_indices]
+    # Validate: check that all sampled indices exist in global_train_df (use set for O(1) lookups)
+    valid_indices_set = set(global_train_df.index)
+    sampled_indices = [idx for idx in sampled_indices if idx in valid_indices_set]
 
     if len(sampled_indices) == 0:
         raise ValueError("No valid indices after sampling!")
