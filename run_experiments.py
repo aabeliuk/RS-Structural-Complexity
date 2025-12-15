@@ -982,6 +982,7 @@ def plot_metrics(results_df, dataset_name, algorithm):
     color_difficult = '#E63946'
     color_random = '#457B9D'
     color_easy = '#1EC423'
+    color_temporal = '#F77F00'
 
     # Filter data
     data = results_df[(results_df['dataset'] == dataset_name) &
@@ -990,6 +991,7 @@ def plot_metrics(results_df, dataset_name, algorithm):
     difficult_data = data[data['strategy'] == 'difficult'].sort_values('sampling_rate')
     random_data = data[data['strategy'] == 'random'].sort_values('sampling_rate')
     easy_data = data[data['strategy'] == 'difficult_inverse'].sort_values('sampling_rate')
+    temporal_data = data[data['strategy'] == 'temporal'].sort_values('sampling_rate')
 
     # Plot 1: Precision
     axes[0].plot(difficult_data['sampling_rate'], difficult_data['precision'],
@@ -1001,6 +1003,9 @@ def plot_metrics(results_df, dataset_name, algorithm):
     axes[0].plot(easy_data['sampling_rate'], easy_data['precision'],
                  marker='^', linewidth=2.5, markersize=8,
                  color=color_easy, label='Easiest', linestyle=':')
+    axes[0].plot(temporal_data['sampling_rate'], temporal_data['precision'],
+                 marker='D', linewidth=2.5, markersize=8,
+                 color=color_temporal, label='Temporal', linestyle='-.')
     axes[0].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
     axes[0].set_ylabel(f'Precision@{CONFIG["eval_k"]}', fontsize=12, fontweight='bold')
     axes[0].set_title(f'Precision@{CONFIG["eval_k"]}', fontsize=14, fontweight='bold')
@@ -1018,6 +1023,9 @@ def plot_metrics(results_df, dataset_name, algorithm):
     axes[1].plot(easy_data['sampling_rate'], easy_data['ndcg'],
                  marker='^', linewidth=2.5, markersize=8,
                  color=color_easy, label='Easiest', linestyle=':')
+    axes[1].plot(temporal_data['sampling_rate'], temporal_data['ndcg'],
+                 marker='D', linewidth=2.5, markersize=8,
+                 color=color_temporal, label='Temporal', linestyle='-.')
     axes[1].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
     axes[1].set_ylabel(f'NDCG@{CONFIG["eval_k"]}', fontsize=12, fontweight='bold')
     axes[1].set_title(f'NDCG@{CONFIG["eval_k"]}', fontsize=14, fontweight='bold')
@@ -1035,6 +1043,9 @@ def plot_metrics(results_df, dataset_name, algorithm):
     axes[2].plot(easy_data['sampling_rate'], easy_data['map'],
                  marker='^', linewidth=2.5, markersize=8,
                  color=color_easy, label='Easiest', linestyle=':')
+    axes[2].plot(temporal_data['sampling_rate'], temporal_data['map'],
+                 marker='D', linewidth=2.5, markersize=8,
+                 color=color_temporal, label='Temporal', linestyle='-.')
     axes[2].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
     axes[2].set_ylabel(f'MAP@{CONFIG["eval_k"]}', fontsize=12, fontweight='bold')
     axes[2].set_title(f'MAP@{CONFIG["eval_k"]}', fontsize=14, fontweight='bold')
@@ -1073,6 +1084,7 @@ def plot_rpa(results_df, dataset_name, algorithm):
     color_difficult = '#E63946'
     color_random = '#457B9D'
     color_easy = '#1EC423'
+    color_temporal = '#F77F00'
 
     # Filter data (exclude 100% as it's the baseline)
     data = results_df[(results_df['dataset'] == dataset_name) &
@@ -1082,6 +1094,7 @@ def plot_rpa(results_df, dataset_name, algorithm):
     difficult_data = data[data['strategy'] == 'difficult'].sort_values('sampling_rate')
     random_data = data[data['strategy'] == 'random'].sort_values('sampling_rate')
     easy_data = data[data['strategy'] == 'difficult_inverse'].sort_values('sampling_rate')
+    temporal_data = data[data['strategy'] == 'temporal'].sort_values('sampling_rate')
 
     # Plot 1: Precision RPA
     axes[0].plot(difficult_data['sampling_rate'], difficult_data['precision_rpa'],
@@ -1093,6 +1106,9 @@ def plot_rpa(results_df, dataset_name, algorithm):
     axes[0].plot(easy_data['sampling_rate'], easy_data['precision_rpa'],
                  marker='^', linewidth=2.5, markersize=8,
                  color=color_easy, label='Easiest', linestyle=':')
+    axes[0].plot(temporal_data['sampling_rate'], temporal_data['precision_rpa'],
+                 marker='D', linewidth=2.5, markersize=8,
+                 color=color_temporal, label='Temporal', linestyle='-.')
     axes[0].axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
     axes[0].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
     axes[0].set_ylabel('RPA (%)', fontsize=12, fontweight='bold')
@@ -1110,6 +1126,9 @@ def plot_rpa(results_df, dataset_name, algorithm):
     axes[1].plot(easy_data['sampling_rate'], easy_data['ndcg_rpa'],
                  marker='^', linewidth=2.5, markersize=8,
                  color=color_easy, label='Easiest', linestyle=':')
+    axes[1].plot(temporal_data['sampling_rate'], temporal_data['ndcg_rpa'],
+                 marker='D', linewidth=2.5, markersize=8,
+                 color=color_temporal, label='Temporal', linestyle='-.')
     axes[1].axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
     axes[1].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
     axes[1].set_ylabel('RPA (%)', fontsize=12, fontweight='bold')
@@ -1127,6 +1146,9 @@ def plot_rpa(results_df, dataset_name, algorithm):
     axes[2].plot(easy_data['sampling_rate'], easy_data['map_rpa'],
                  marker='^', linewidth=2.5, markersize=8,
                  color=color_easy, label='Easiest', linestyle=':')
+    axes[2].plot(temporal_data['sampling_rate'], temporal_data['map_rpa'],
+                 marker='D', linewidth=2.5, markersize=8,
+                 color=color_temporal, label='Temporal', linestyle='-.')
     axes[2].axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
     axes[2].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
     axes[2].set_ylabel('RPA (%)', fontsize=12, fontweight='bold')
@@ -1373,6 +1395,21 @@ def load_inter_file(dataset_name, data_path='dataset/'):
 
     print(f"  Loaded {len(df):,} interactions")
     print(f"  Columns: {list(df.columns)}")
+
+    # Normalize column names: map common alternative names to standard names
+    column_mappings = {
+        'artist_id': 'item_id',    # lastfm
+        'movie_id': 'item_id',     # movielens variants
+        'book_id': 'item_id',      # book datasets
+        'product_id': 'item_id',   # e-commerce datasets
+        'track_id': 'item_id',     # music datasets
+        'song_id': 'item_id',      # music datasets
+    }
+
+    for old_name, new_name in column_mappings.items():
+        if old_name in df.columns and new_name not in df.columns:
+            print(f"  Mapping '{old_name}' → '{new_name}'")
+            df = df.rename(columns={old_name: new_name})
 
     # Handle implicit feedback datasets (no rating column)
     if 'rating' not in df.columns:
