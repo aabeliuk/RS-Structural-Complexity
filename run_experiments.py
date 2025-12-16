@@ -45,31 +45,33 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 CONFIG = {
     # Datasets to process
     'datasets': [
-        'Amazon_Health_and_Personal_Care',  # Test with just one dataset first
-        # 'Amazon_Grocery_and_Gourmet_Food',
-        # 'book-crossing',
-        # 'lastfm',
-        # 'ModCloth',
-        # 'pinterest',
-        # 'RateBeer',
-        # 'steam',
-        # 'yelp2022'
+        'Amazon_Health_and_Personal_Care',
+        'Amazon_Grocery_and_Gourmet_Food',
+        'book-crossing',
+        'lastfm',
+        'ModCloth',
+        'pinterest',
+        'RateBeer',
+        'steam',
+        'yelp2022',
+        'jester',
+        'Behance',
+        'mind'
     ],
 
     # RS Algorithms to test
-    # 'algorithms': ['LightGCN', 'BPR', 'NeuMF'],
-    'algorithms': ['BPR'],
+    'algorithms': ['LightGCN', 'BPR', 'NeuMF'],
+    # 'algorithms': ['BPR'],
 
     # Sampling rates to test (%)
-    # 'sampling_rates': [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
-    'sampling_rates': [10, 100],  # Test with just 10% and 100%
+    'sampling_rates': [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
 
     # Sampling strategies
     'strategies': ['difficult', 'random', 'difficult_inverse', 'temporal'],
 
     # Experiment parameters
     'min_ratings': 10,        # Minimum ratings per user/item
-    'min_total_ratings_per_user': 3,  # Minimum total interactions per user (for stratified sampling)
+    'min_total_ratings_per_user': 11,  # Minimum total interactions per user (for stratified sampling)
     'max_users': 100000,     # Maximum users to keep
     'max_items': 100000,     # Maximum items to keep
     'n_partitions': 10,      # Partitions for perturbation analysis
