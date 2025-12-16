@@ -535,14 +535,15 @@ def compute_difficult_ratings(df, dataset_name, force_recompute=False):
         M_P = M_P.astype('float32')
 
         # Compute perturbation impact
-        M_tilde, Sigma, Sigma_tilde = compute_perturbation_impact(
+        (U, sigma_tilde_diag, Vt), Sigma, Sigma_tilde = compute_perturbation_impact(
             M, M_P, n_components, timing_flag=False
         )
 
         # Calculate squared error for each rating
+        # Compute predictions on-demand instead of using materialized M_tilde
         for idx, row, col in mapped_indices:
             true_rating = M[row, col]
-            predicted_rating = M_tilde[row, col]
+            predicted_rating = np.dot(U[row, :] * sigma_tilde_diag, Vt[:, col])
             squared_error = (true_rating - predicted_rating) ** 2
             squared_errors[idx] = squared_error
 
