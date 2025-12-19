@@ -171,6 +171,10 @@ def analytical_structural_perturbation_v2(train_df, p=0.1, n_iterations=1,
         Fraction of perturbations that are value-based (vs structural)
         - alpha=1.0: only permute rating values
         - alpha=0.0: only move ratings to zero positions
+        Note: For binary/implicit feedback datasets (all ratings are 0 or 1),
+        alpha is automatically set to 0 since value permutation has no effect
+        when all values are identical. This ensures the full perturbation
+        amount p is applied through structural perturbations only.
     time_sampling : bool, optional (default=True)
         If True, sample newer ratings with higher probability
 
@@ -189,25 +193,22 @@ def analytical_structural_perturbation_v2(train_df, p=0.1, n_iterations=1,
     std_rmse_svd : float
         Standard deviation of SVD RMSE
 
-    Example:
-    --------
-    >>> import pandas as pd
-    >>> # Load your data
-    >>> df = pd.DataFrame({
-    ...     'user_id': [1, 1, 2, 2, 3],
-    ...     'item_id': [1, 2, 1, 3, 2],
-    ...     'rating': [5, 4, 3, 5, 4],
-    ...     'timestamp': pd.date_range('2020-01-01', periods=5)
-    ... })
-    >>> rmse, std, s_dist, std_s, rmse_svd, std_svd = \
-    ...     analytical_structural_perturbation_v2(df, p=0.2, n_iterations=5)
-    >>> print(f"Structural Perturbation RMSE: {rmse:.4f} ± {std:.4f}")
     """
     np.random.seed(42)
 
     df_random = train_df.copy()
     M, user_map, item_map = convert_to_sparse_matrix(train_df)
     M = M.astype('float32')
+
+    # Detect binary/implicit feedback data
+    unique_values = np.unique(M.data)
+    is_binary = len(unique_values) <= 2 and all(v in [0.0, 1.0] for v in unique_values)
+
+    if is_binary and alpha > 0:
+        print(f"  Binary/implicit feedback detected (unique values: {sorted(unique_values)})")
+        print(f"  Adjusting alpha: {alpha} → 0.0 (structural perturbations only)")
+        print(f"  Reason: Permuting identical values has no effect on binary data")
+        alpha = 0.0
 
     # Adjust n_components if too large
     n_components = min(n_components, int(min(M.shape) / 4))
