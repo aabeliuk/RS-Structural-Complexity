@@ -352,6 +352,7 @@ def train_model_with_fixed_test(train_df, global_test_df, model_type='BPR', conf
         'ITEM_ID_FIELD': 'item_id',
         'RATING_FIELD': 'rating',
         'TIME_FIELD': 'timestamp',
+        'LABEL_FIELD': 'rating',  # For context-aware models like FM
         'load_col': {'inter': ['user_id', 'item_id', 'rating', 'timestamp']},
 
         # Use exact split ratios for train/test
@@ -378,6 +379,13 @@ def train_model_with_fixed_test(train_df, global_test_df, model_type='BPR', conf
         'save_dataloaders': False,
         'show_progress': False,
     }
+
+    # Model-specific configurations
+    if model_type in ['FM', 'FFM', 'DeepFM', 'xDeepFM', 'AFM', 'NFM', 'DCN', 'DCNV2']:
+        # Context-aware models need additional config
+        base_config.update({
+            'threshold': {'rating': 0.5},  # Binary threshold for implicit feedback
+        })
 
     if config_dict:
         base_config.update(config_dict)
