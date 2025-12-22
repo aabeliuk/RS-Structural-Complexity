@@ -174,6 +174,11 @@ def save_recbole_format(df, dataset_name, output_path='dataset/'):
     Returns:
     --------
     str : Path to the dataset directory
+
+    Notes:
+    ------
+    Automatically adds a 'label' column (equal to rating) for context-aware
+    models like FM, FFM, DeepFM that require explicit label fields.
     """
     dataset_dir = os.path.join(output_path, dataset_name)
     os.makedirs(dataset_dir, exist_ok=True)
@@ -183,17 +188,21 @@ def save_recbole_format(df, dataset_name, output_path='dataset/'):
     if 'timestamp' in df_export.columns and pd.api.types.is_datetime64_any_dtype(df_export['timestamp']):
         df_export['timestamp'] = df_export['timestamp'].astype('int64') // 10**9
 
+    # Add label column for context-aware models (FM, FFM, DeepFM, etc.)
+    # Label is same as rating for recommendation tasks
+    df_export['label'] = df_export['rating']
+
     # FIXED: Don't convert tokens to integers - keep original tokens
     # This ensures token consistency between train and test data
     # RecBole can handle string tokens directly
 
     with open(inter_file, 'w') as f:
-        header_cols = ['user_id:token', 'item_id:token', 'rating:float']
+        header_cols = ['user_id:token', 'item_id:token', 'rating:float', 'label:float']
         if 'timestamp' in df_export.columns:
             header_cols.append('timestamp:float')
         f.write('\t'.join(header_cols) + '\n')
 
-    cols_to_write = ['user_id', 'item_id', 'rating']
+    cols_to_write = ['user_id', 'item_id', 'rating', 'label']
     if 'timestamp' in df_export.columns:
         cols_to_write.append('timestamp')
 
@@ -352,8 +361,8 @@ def train_model_with_fixed_test(train_df, global_test_df, model_type='BPR', conf
         'ITEM_ID_FIELD': 'item_id',
         'RATING_FIELD': 'rating',
         'TIME_FIELD': 'timestamp',
-        'LABEL_FIELD': 'rating',  # For context-aware models like FM
-        'load_col': {'inter': ['user_id', 'item_id', 'rating', 'timestamp']},
+        'LABEL_FIELD': 'label',  # For context-aware models like FM
+        'load_col': {'inter': ['user_id', 'item_id', 'rating', 'label', 'timestamp']},
 
         # Use exact split ratios for train/test
         'eval_args': {
