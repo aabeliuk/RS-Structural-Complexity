@@ -45,7 +45,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 CONFIG = {
     # Datasets to process
     'datasets': [
-        'Amazon_Health_and_Personal_Care',
+        # 'Amazon_Health_and_Personal_Care',
         'Amazon_Grocery_and_Gourmet_Food',
         'book-crossing',
         'lastfm',
@@ -54,14 +54,16 @@ CONFIG = {
         'RateBeer',
         'steam',
         'yelp2022',
-        'jester',
+        # 'jester',
         'Behance',
-        'mind'
+        'mind',
+        'KDD2010-algebra2006_2007',
+        'ml-1m' #movielens
     ],
 
     # RS Algorithms to test
-    'algorithms': ['LightGCN', 'BPR', 'NeuMF'],
-    # 'algorithms': ['BPR'],
+    # 'algorithms': ['LightGCN', 'BPR', 'NeuMF'],
+    'algorithms': ['FM'],
 
     # Sampling rates to test (%)
     'sampling_rates': [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
