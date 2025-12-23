@@ -20,6 +20,8 @@ import pickle
 import warnings
 from datetime import datetime
 import torch
+import gc
+import psutil
 
 # Import RecBole libraries
 from recbole.config import Config
@@ -37,6 +39,24 @@ from structural_perturbation import (
 # Suppress warnings for cleaner output
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+
+# =============================================================================
+# MEMORY MONITORING UTILITIES
+# =============================================================================
+
+def get_memory_mb():
+    """Get current process memory usage in MB."""
+    process = psutil.Process(os.getpid())
+    return process.memory_info().rss / 1024 / 1024
+
+
+def print_memory(label=""):
+    """Print current memory usage."""
+    mem_mb = get_memory_mb()
+    print(f"      [MEM] {label}: {mem_mb:.1f} MB ({mem_mb/1024:.2f} GB)")
+    return mem_mb
+
 
 # =============================================================================
 # CONFIGURATION
@@ -375,8 +395,6 @@ def train_model_with_fixed_test(train_df, global_test_df, model_type='BPR', conf
 
         # Performance settings
         'epochs': 20,
-        'train_batch_size': 2048,
-        'eval_batch_size': 4096,
         'learning_rate': 0.001,
         'embedding_size': 64,
 
@@ -390,6 +408,20 @@ def train_model_with_fixed_test(train_df, global_test_df, model_type='BPR', conf
         'save_dataloaders': False,
         'show_progress': False,
     }
+
+    # Model-specific memory optimization
+    if model_type == 'EASE':
+        # EASE creates huge item×item Gram matrix - reduce batch sizes
+        base_config.update({
+            'train_batch_size': 512,    # Reduced from 2048
+            'eval_batch_size': 1024,    # Reduced from 4096
+        })
+    else:
+        # Default batch sizes for other models
+        base_config.update({
+            'train_batch_size': 2048,
+            'eval_batch_size': 4096,
+        })
 
     # Model-specific configurations
     if model_type in ['FM', 'FFM', 'DeepFM', 'xDeepFM', 'AFM', 'NFM', 'DCN', 'DCNV2']:
@@ -677,6 +709,9 @@ def run_single_experiment(train_sample_df, global_test_df, algorithm, strategy,
     --------
     dict : Result dictionary with metrics
     """
+    # Memory tracking - before experiment
+    mem_before = print_memory("Before experiment")
+
     try:
         # CRITICAL FIX: Filter test set to only include users/items in training sample
         # This prevents empty test sets when training on small samples
@@ -701,20 +736,38 @@ def run_single_experiment(train_sample_df, global_test_df, algorithm, strategy,
                 'status': 'no_test_data'
             }
 
+        # EASE-specific memory warning
+        n_items = train_sample_df['item_id'].nunique()
+        if algorithm == 'EASE':
+            gram_size_gb = (n_items * n_items * 4) / (1024**3)
+            print(f"      [EASE] Gram matrix: {n_items}×{n_items} = {gram_size_gb:.2f} GB")
+
         # Train model
         model, config, trainer, dataset, test_data = train_model_with_fixed_test(
             train_sample_df, filtered_test_df, model_type=algorithm
         )
+
+        mem_after_train = print_memory("After training")
 
         # Evaluate
         precision, ndcg, map_score = evaluate_model(
             model, config, trainer, test_data, k=CONFIG['eval_k']
         )
 
-        # Clear GPU memory
-        del model, trainer
+        mem_after_eval = print_memory("After evaluation")
+
+        # CRITICAL: Comprehensive cleanup
+        del model, trainer, dataset, test_data, config
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        gc.collect()
+
+        mem_after_cleanup = print_memory("After cleanup")
+
+        # Check for memory leaks
+        mem_leaked = mem_after_cleanup - mem_before
+        if mem_leaked > 1000:  # More than 1 GB leaked
+            print(f"      ⚠️  WARNING: {mem_leaked:.1f} MB ({mem_leaked/1024:.2f} GB) not freed!")
 
         return {
             'sampling_rate': sampling_rate,
@@ -730,6 +783,10 @@ def run_single_experiment(train_sample_df, global_test_df, algorithm, strategy,
         import traceback
         print(f"      ERROR: {str(e)}")
         print(f"      Traceback: {traceback.format_exc()}")
+
+        # Cleanup on error
+        gc.collect()
+
         return {
             'sampling_rate': sampling_rate,
             'strategy': strategy,
@@ -842,6 +899,23 @@ def run_experiments_for_dataset(dataset_name, algorithm, difficult_data):
     global_test_df = difficult_data['global_test_df']
     per_user_difficulty = difficult_data['per_user_difficulty']
 
+    # EASE memory check - skip if dataset too large
+    if algorithm == 'EASE':
+        n_items = global_train_df['item_id'].nunique()
+        gram_size_gb = (n_items ** 2 * 4) / (1024**3)
+
+        print(f"    [EASE] Full dataset: {n_items:,} items → {gram_size_gb:.2f} GB Gram matrix")
+
+        # Check available memory
+        available_gb = psutil.virtual_memory().available / (1024**3)
+        print(f"    [EASE] Available RAM: {available_gb:.1f} GB")
+
+        # Skip if Gram matrix would be >40% of available memory
+        if gram_size_gb > available_gb * 0.4:
+            print(f"    ⚠️  SKIPPING EASE: Gram matrix too large for available memory")
+            print(f"    Reason: {gram_size_gb:.1f} GB needed, {available_gb:.1f} GB available")
+            return pd.DataFrame()  # Return empty results
+
     for sampling_rate in CONFIG['sampling_rates']:
         # Calculate expected total samples (for reporting)
         total_samples = sum(
@@ -914,6 +988,11 @@ def run_experiments_for_dataset(dataset_name, algorithm, difficult_data):
         result['algorithm'] = algorithm
         results.append(result)
         print(f"P@{CONFIG['eval_k']}={result['precision']:.4f}")
+
+        # CRITICAL: Force cleanup after each sampling rate
+        gc.collect()
+        mem_after_rate = get_memory_mb()
+        print(f"    Memory after {sampling_rate}%: {mem_after_rate:.1f} MB ({mem_after_rate/1024:.2f} GB)")
 
     return pd.DataFrame(results)
 
