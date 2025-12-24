@@ -88,20 +88,6 @@ CONFIG = {
     'learning_rate': 0.001,
     'embedding_size': 64,
 
-    # Balanced preprocessing (alternative to filter-based preprocessing)
-    # Reduces dataset to fixed number of interactions before difficulty analysis.
-    # Selects most active users and popular items to maintain dataset density.
-    # Use for: EASE memory management, fixed-size experiments, large datasets
-    'balanced_preprocessing': {
-        'enabled': False,  # Set to True to enable
-        'target_interactions': 100000,  # Target number of interactions
-        'min_items_per_user': 3,  # Minimum interactions per user
-        'datasets': [  # Only preprocess these datasets
-            'Amazon_Grocery_and_Gourmet_Food',
-            'Amazon_Health_and_Personal_Care',
-        ]
-    },
-
     # Output directories
     'results_dir': 'results/',
     'plots_dir': 'plots/',
@@ -172,83 +158,6 @@ def preprocess_data(df, min_r=10, max_n=100000, min_total_ratings=3):
         df_filtered = df_filtered[df_filtered['item_id'].isin(sampled_items)]
 
     return df_filtered
-
-
-def balanced_fixed_preprocess(df, target_interactions, min_items_per_user=3):
-    """
-    Preprocessing: Reduce dataset to fixed number of interactions while
-    maintaining density. Selects most active users and most popular items.
-
-    This is an alternative preprocessing method to preprocess_data().
-    Use this to create fixed-size datasets that control item count for EASE.
-
-    Parameters:
-    -----------
-    df : pd.DataFrame
-        Full dataset with columns: user_id, item_id, rating, timestamp
-    target_interactions : int
-        Target number of interactions (e.g., 100000)
-    min_items_per_user : int
-        Minimum interactions per user to be considered active
-
-    Returns:
-    --------
-    pd.DataFrame : Preprocessed dataset with ~target_interactions rows
-    """
-    print(f"  [Preprocessing] Balanced fixed sampling to {target_interactions:,} interactions...")
-
-    original_interactions = len(df)
-    original_users = df['user_id'].nunique()
-    original_items = df['item_id'].nunique()
-
-    print(f"    Original: {original_interactions:,} interactions, {original_users:,} users, {original_items:,} items")
-
-    # Calculate target users/items from proportions
-    avg_per_user = original_interactions / original_users
-    avg_per_item = original_interactions / original_items
-
-    target_users = int(target_interactions / avg_per_user)
-    target_items = int(target_interactions / avg_per_item)
-
-    print(f"    Target: {target_users:,} users, {target_items:,} items (maintaining density)")
-
-    # Select most active users
-    user_counts = df['user_id'].value_counts()
-    active_users = user_counts[user_counts >= min_items_per_user]
-
-    if len(active_users) < target_users:
-        print(f"    Warning: Only {len(active_users):,} active users (≥{min_items_per_user} interactions)")
-        target_users = len(active_users)
-
-    selected_users = active_users.head(target_users).index
-    df_users = df[df['user_id'].isin(selected_users)]
-
-    # Select most popular items among these users
-    item_counts = df_users['item_id'].value_counts()
-
-    if len(item_counts) < target_items:
-        print(f"    Warning: Only {len(item_counts):,} items available")
-        target_items = len(item_counts)
-
-    selected_items = item_counts.head(target_items).index
-    df_filtered = df_users[df_users['item_id'].isin(selected_items)]
-
-    # Sample to exact target
-    if len(df_filtered) > target_interactions:
-        df_final = df_filtered.sample(n=target_interactions, random_state=42)
-    else:
-        df_final = df_filtered.copy()
-        print(f"    Warning: Only {len(df_final):,} interactions available (less than target)")
-
-    # Final statistics
-    final_users = df_final['user_id'].nunique()
-    final_items = df_final['item_id'].nunique()
-    final_interactions = len(df_final)
-
-    print(f"    Result: {final_interactions:,} interactions, {final_users:,} users, {final_items:,} items")
-    print(f"    Density: {final_interactions/(final_users*final_items):.4%} (original: {original_interactions/(original_users*original_items):.4%})")
-
-    return df_final
 
 
 def save_recbole_format(df, dataset_name, output_path='dataset/'):
@@ -814,10 +723,7 @@ def run_single_experiment(train_sample_df, global_test_df, algorithm, strategy,
             'ndcg': ndcg,
             'map': map_score,
             'n_ratings': n_ratings,
-            'status': 'success',
-            # Preprocessing metadata
-            'preprocessing_method': 'balanced_fixed' if CONFIG['balanced_preprocessing'].get('enabled', False) else 'filter_based',
-            'preprocessing_target': CONFIG['balanced_preprocessing'].get('target_interactions', None) if CONFIG['balanced_preprocessing'].get('enabled', False) else None,
+            'status': 'success'
         }
 
     except Exception as e:
@@ -832,10 +738,7 @@ def run_single_experiment(train_sample_df, global_test_df, algorithm, strategy,
             'map': 0.0,
             'n_ratings': n_ratings,
             'status': 'failed',
-            'error': str(e),
-            # Preprocessing metadata
-            'preprocessing_method': 'balanced_fixed' if CONFIG['balanced_preprocessing'].get('enabled', False) else 'filter_based',
-            'preprocessing_target': CONFIG['balanced_preprocessing'].get('target_interactions', None) if CONFIG['balanced_preprocessing'].get('enabled', False) else None,
+            'error': str(e)
         }
 
 
@@ -1594,27 +1497,14 @@ def main():
         print(f"Loading {dataset_name}...")
         df = load_inter_file(dataset_name)
 
-        # Preprocessing: Choose method based on config
+        # Preprocess
         print(f"Preprocessing...")
-        preprocess_config = CONFIG.get('balanced_preprocessing', {})
-
-        if preprocess_config.get('enabled', False) and dataset_name in preprocess_config.get('datasets', []):
-            # Method B: Balanced fixed sampling (NEW)
-            print("  Using balanced fixed preprocessing...")
-            df = balanced_fixed_preprocess(
-                df,
-                target_interactions=preprocess_config['target_interactions'],
-                min_items_per_user=preprocess_config.get('min_items_per_user', 3)
-            )
-        else:
-            # Method A: Filter-based preprocessing (CURRENT)
-            print("  Using filter-based preprocessing...")
-            df = preprocess_data(
-                df,
-                min_r=CONFIG['min_ratings'],
-                max_n=CONFIG['max_users'],
-                min_total_ratings=CONFIG['min_total_ratings_per_user']
-            )
+        df = preprocess_data(
+            df,
+            min_r=CONFIG['min_ratings'],
+            max_n=CONFIG['max_users'],
+            min_total_ratings=CONFIG['min_total_ratings_per_user']
+        )
 
         n_users = df['user_id'].nunique()
         n_items = df['item_id'].nunique()
