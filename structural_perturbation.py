@@ -287,7 +287,12 @@ def analytical_structural_perturbation_v2(train_df, p=0.1, n_iterations=1,
         # Calculate spectral distance
         lambda_true = Sigma.diagonal()
         lambda_approx = Sigma_tilde.diagonal()
-        relative_errors = np.abs(lambda_true - lambda_approx) / lambda_true
+
+        # Sort singular values before calculating relative errors
+        lambda_true = np.sort(lambda_true)
+        lambda_approx = np.sort(lambda_approx)
+
+        relative_errors = np.abs(lambda_true - lambda_approx)
         s_distance = np.mean(relative_errors)
         s_distance_values.append(s_distance)
 
