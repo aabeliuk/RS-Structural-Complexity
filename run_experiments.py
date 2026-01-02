@@ -160,6 +160,161 @@ def preprocess_data(df, min_r=10, max_n=100000, min_total_ratings=3):
     return df_filtered
 
 
+def preprocess_data_balanced(df, target_interactions=100000, min_r=10, min_total_ratings=3):
+    """
+    Preprocess dataset using balanced sampling that preserves statistical properties.
+
+    This function maintains the original dataset's:
+    - Average interactions per user
+    - Average interactions per item
+    - Overall interaction density
+
+    Algorithm:
+    1. Calculate original dataset statistics
+    2. Infer target numbers of users and items to maintain these statistics
+    3. Select most active users (ranked by interaction count)
+    4. Select most popular items among those users
+    5. Adjust to exact target size by random sampling if needed
+
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Raw dataset with columns: user_id, item_id, rating, timestamp
+    target_interactions : int
+        Desired number of interactions in the subsample
+    min_r : int
+        Minimum number of ratings per user/item to be eligible
+    min_total_ratings : int
+        Minimum total interactions per user (for stratified per-user sampling)
+
+    Returns:
+    --------
+    pd.DataFrame : Filtered dataset with approximately target_interactions interactions
+    """
+    if 'timestamp' in df.columns and not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
+        df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+
+    # Sort by user_id and timestamp
+    sort_cols = ['user_id']
+    if 'timestamp' in df.columns:
+        sort_cols.append('timestamp')
+    df = df.sort_values(by=sort_cols)
+
+    # =========================================================================
+    # Step 1: Calculate original dataset statistics
+    # =========================================================================
+    n_total_interactions = len(df)
+    n_total_users = df['user_id'].nunique()
+    n_total_items = df['item_id'].nunique()
+
+    avg_interactions_per_user = n_total_interactions / n_total_users
+    avg_interactions_per_item = n_total_interactions / n_total_items
+    original_density = n_total_interactions / (n_total_users * n_total_items)
+
+    print(f"  Original dataset statistics:")
+    print(f"    Total interactions: {n_total_interactions:,}")
+    print(f"    Total users: {n_total_users:,}")
+    print(f"    Total items: {n_total_items:,}")
+    print(f"    Avg interactions per user: {avg_interactions_per_user:.2f}")
+    print(f"    Avg interactions per item: {avg_interactions_per_item:.2f}")
+    print(f"    Density: {original_density:.6f}")
+
+    # =========================================================================
+    # Step 2: Infer target numbers of users and items
+    # =========================================================================
+    # Given target_interactions, solve for n_users and n_items such that:
+    # - target_interactions / n_users ≈ avg_interactions_per_user
+    # - target_interactions / n_items ≈ avg_interactions_per_item
+    # - target_interactions / (n_users * n_items) ≈ original_density
+
+    # From the first two equations:
+    target_n_users = int(target_interactions / avg_interactions_per_user)
+    target_n_items = int(target_interactions / avg_interactions_per_item)
+
+    # Verify density constraint
+    estimated_density = target_interactions / (target_n_users * target_n_items)
+    density_ratio = estimated_density / original_density
+
+    print(f"  Target subsample plan:")
+    print(f"    Target interactions: {target_interactions:,}")
+    print(f"    Target users: {target_n_users:,}")
+    print(f"    Target items: {target_n_items:,}")
+    print(f"    Estimated density: {estimated_density:.6f}")
+    print(f"    Density ratio (new/original): {density_ratio:.2f}")
+
+    # =========================================================================
+    # Step 3: Select active users
+    # =========================================================================
+    # Rank users by number of interactions
+    user_ratings_count = df['user_id'].value_counts()
+
+    # Only consider users with at least minimum interactions
+    min_required = max(min_r, min_total_ratings)
+    eligible_users = user_ratings_count[user_ratings_count >= min_required]
+
+    # Select most active users up to target
+    n_users_to_select = min(target_n_users, len(eligible_users))
+    selected_users = eligible_users.nlargest(n_users_to_select).index
+
+    print(f"  Selected {n_users_to_select:,} active users (from {len(eligible_users):,} eligible)")
+
+    # Filter to selected users
+    df_users = df[df['user_id'].isin(selected_users)]
+
+    # =========================================================================
+    # Step 4: Select popular items among selected users
+    # =========================================================================
+    # Rank items by popularity in the selected user interactions
+    item_ratings_count = df_users['item_id'].value_counts()
+
+    # Only consider items with at least minimum interactions
+    eligible_items = item_ratings_count[item_ratings_count >= min_r]
+
+    # Select most popular items up to target
+    n_items_to_select = min(target_n_items, len(eligible_items))
+    selected_items = eligible_items.nlargest(n_items_to_select).index
+
+    print(f"  Selected {n_items_to_select:,} popular items (from {len(eligible_items):,} eligible)")
+
+    # Filter to selected items
+    df_filtered = df_users[df_users['item_id'].isin(selected_items)]
+
+    # =========================================================================
+    # Step 5: Adjust to exact target size
+    # =========================================================================
+    n_current_interactions = len(df_filtered)
+
+    if n_current_interactions > target_interactions:
+        # Randomly sample down to target
+        print(f"  Sampling down from {n_current_interactions:,} to {target_interactions:,} interactions")
+        df_filtered = df_filtered.sample(n=target_interactions, random_state=CONFIG['random_seed'])
+    elif n_current_interactions < target_interactions:
+        # Keep all, report shortfall
+        shortfall = target_interactions - n_current_interactions
+        print(f"  Shortfall: {shortfall:,} interactions (kept {n_current_interactions:,} of {target_interactions:,})")
+    else:
+        print(f"  Exact target reached: {n_current_interactions:,} interactions")
+
+    # =========================================================================
+    # Final statistics
+    # =========================================================================
+    final_n_users = df_filtered['user_id'].nunique()
+    final_n_items = df_filtered['item_id'].nunique()
+    final_n_interactions = len(df_filtered)
+    final_density = final_n_interactions / (final_n_users * final_n_items)
+
+    print(f"  Final subsample statistics:")
+    print(f"    Interactions: {final_n_interactions:,}")
+    print(f"    Users: {final_n_users:,}")
+    print(f"    Items: {final_n_items:,}")
+    print(f"    Avg interactions per user: {final_n_interactions / final_n_users:.2f}")
+    print(f"    Avg interactions per item: {final_n_interactions / final_n_items:.2f}")
+    print(f"    Density: {final_density:.6f}")
+    print(f"    Density preservation: {(final_density / original_density) * 100:.1f}%")
+
+    return df_filtered
+
+
 def save_recbole_format(df, dataset_name, output_path='dataset/'):
     """
     Save DataFrame to RecBole's .inter format.
