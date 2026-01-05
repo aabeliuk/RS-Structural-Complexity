@@ -516,6 +516,10 @@ def train_model_with_fixed_test(train_df, global_test_df, model_type='BPR', conf
     if not topk_values:
         topk_values = [max_k]  # Use max available if all standard values are too large
 
+    # Calculate max user interactions to prevent users who've seen all items
+    # Allow users up to 80% of items to ensure negative sampling is possible
+    max_user_interactions = max(10, int(n_items * 0.8))
+
     # -----------------------------------------------------------
     # 2.2 Base RecBole configuration
     # -----------------------------------------------------------
@@ -538,6 +542,10 @@ def train_model_with_fixed_test(train_df, global_test_df, model_type='BPR', conf
             'mode': 'full',
             'order': 'RO'  # Respect order (train first, then test)
         },
+
+        # Filter users to ensure negative sampling is possible
+        # Users who have interacted with too many items can't have negative samples
+        'user_inter_num_interval': f"[0,{max_user_interactions}]",
 
         # Performance settings
         'epochs': 20,
