@@ -1581,6 +1581,8 @@ def load_inter_file(dataset_name, data_path='dataset/'):
         'product_id': 'item_id',   # e-commerce datasets
         'track_id': 'item_id',     # music datasets
         'song_id': 'item_id',      # music datasets
+        'student_id': 'user_id',   # educational datasets (KDD2010, etc.)
+        'problem_hierarchy': 'item_id',  # educational datasets (KDD2010)
     }
 
     for old_name, new_name in column_mappings.items():
