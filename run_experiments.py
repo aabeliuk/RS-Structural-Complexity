@@ -58,12 +58,21 @@ CONFIG = {
         'Behance',
         'mind',
         'KDD2010-algebra2006_2007',
-        'ml-1m' #movielens
+        'ml-1m', #movielens
+        'Food',
+        'Twitch-100k',
+        'DianPing',
+        'epinions',
+        'anime',
+        'douban',
+        'RentTheRunway',
+        'BeerAdvocate',
+        
     ],
 
     # RS Algorithms to test
-    # 'algorithms': ['LightGCN', 'BPR', 'NeuMF'],
-    'algorithms': ['FM'],
+    'algorithms': ['LightGCN', 'BPR', 'NeuMF'],
+    # 'algorithms': ['FM', 'EASE'],
 
     # Sampling rates to test (%)
     'sampling_rates': [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
@@ -76,6 +85,7 @@ CONFIG = {
     'min_total_ratings_per_user': 11,  # Minimum total interactions per user (for stratified sampling)
     'max_users': 100000,     # Maximum users to keep
     'max_items': 100000,     # Maximum items to keep
+    'target_interactions': 100000, # Target interactions for balanced sampling
     'n_partitions': 10,      # Partitions for perturbation analysis
     'n_components': 50,     # SVD components for perturbation
     'eval_k': 10,            # Top-K for evaluation metrics
@@ -1664,12 +1674,20 @@ def main():
 
         # Preprocess
         print(f"Preprocessing...")
-        df = preprocess_data(
-            df,
-            min_r=CONFIG['min_ratings'],
-            max_n=CONFIG['max_users'],
+        # df = preprocess_data(
+        #     df,
+        #     min_r=CONFIG['min_ratings'],
+        #     max_n=CONFIG['max_users'],
+        #     min_total_ratings=CONFIG['min_total_ratings_per_user']
+        # )
+
+        df = preprocess_data_balanced(
+            df, 
+            target_interactions= CONFIG['target_interactions'], 
+            min_r=CONFIG['min_ratings'], 
             min_total_ratings=CONFIG['min_total_ratings_per_user']
         )
+
 
         n_users = df['user_id'].nunique()
         n_items = df['item_id'].nunique()
@@ -1680,11 +1698,11 @@ def main():
         print(f"  Items: {n_items:,}")
         print(f"  Ratings: {n_ratings:,}")
         print(f"  Sparsity: {sparsity:.4f}")
-        print()
+
 
         # Compute/load difficult ratings
         difficult_data = compute_difficult_ratings(df, dataset_name)
-        print()
+
 
         # Run experiments for each algorithm
         for algorithm in CONFIG['algorithms']:
