@@ -46,17 +46,17 @@ CONFIG = {
     # Datasets to process
     'datasets': [
         # 'Amazon_Health_and_Personal_Care',
-        'Amazon_Grocery_and_Gourmet_Food',
-        'book-crossing',
-        'lastfm',
-        'ModCloth',
-        'pinterest',
-        'RateBeer',
-        'steam',
-        'yelp2022',
-        # 'jester',
-        'Behance',
-        'mind',
+        # 'Amazon_Grocery_and_Gourmet_Food',
+        # 'book-crossing',
+        # 'lastfm',
+        # 'ModCloth',
+        # 'pinterest',
+        # 'RateBeer',
+        # 'steam',
+        # 'yelp2022',
+        # # 'jester',
+        # 'Behance',
+        # 'mind',
         'KDD2010-algebra2006_2007',
         'ml-1m', #movielens
         'Food',
@@ -67,6 +67,7 @@ CONFIG = {
         'douban',
         'RentTheRunway',
         'BeerAdvocate',
+        'yahoo-music'
         
     ],
 
