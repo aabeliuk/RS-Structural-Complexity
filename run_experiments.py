@@ -523,15 +523,22 @@ def train_model_with_fixed_test(train_df, global_test_df, model_type='BPR', conf
 
     # Calculate number of items to adjust topk dynamically
     n_items = train_df['item_id'].nunique()
+    n_users = train_df['user_id'].nunique()
+    n_interactions = len(train_df)
+
     # Adjust topk to avoid "index k out of range" errors
     max_k = max(1, n_items - 1)  # At least 1, at most n_items-1
     topk_values = [k for k in [5, 10, 20] if k <= max_k]
     if not topk_values:
         topk_values = [max_k]  # Use max available if all standard values are too large
 
-    # Calculate max user interactions to prevent users who've seen all items
-    # Allow users up to 80% of items to ensure negative sampling is possible
-    max_user_interactions = max(10, int(n_items * 0.8))
+    # Calculate dataset density to determine if user filtering is needed
+    density = n_interactions / (n_users * n_items)
+    avg_user_interactions = n_interactions / n_users
+
+    # Only apply user filtering for dense datasets where negative sampling might fail
+    # Dense datasets (density > 0.1 or avg_user_interactions > 0.5 * n_items)
+    apply_user_filter = (density > 0.1) or (avg_user_interactions > 0.5 * n_items)
 
     # -----------------------------------------------------------
     # 2.2 Base RecBole configuration
@@ -577,6 +584,13 @@ def train_model_with_fixed_test(train_df, global_test_df, model_type='BPR', conf
         'save_dataloaders': False,
         'show_progress': False,
     }
+
+    # Conditionally apply user filtering for dense datasets
+    # Only filter users who've seen too many items when density is high
+    if apply_user_filter:
+        max_user_interactions = max(10, int(n_items * 0.95))  # Allow up to 95% of items
+        base_config['user_inter_num_interval'] = f"[0,{max_user_interactions}]"
+        print(f"    Applying user filter: max {max_user_interactions} interactions (density={density:.4f})")
 
     # Model-specific configurations
     if model_type in ['FM', 'FFM', 'DeepFM', 'xDeepFM', 'AFM', 'NFM', 'DCN', 'DCNV2']:
