@@ -20,6 +20,7 @@ import pickle
 import warnings
 from datetime import datetime
 import torch
+import gc
 
 # Import RecBole libraries
 from recbole.config import Config
@@ -46,25 +47,24 @@ CONFIG = {
     # Datasets to process
     'datasets': [
         # 'Amazon_Health_and_Personal_Care',
-        # 'Amazon_Grocery_and_Gourmet_Food',
-        # 'book-crossing',
-        # 'lastfm',
-        # 'ModCloth',
-        # 'pinterest',
-        # 'RateBeer',
-        # 'steam',
-        # 'yelp2022',
-        # # 'jester',
-        # 'Behance',
-        # 'mind',
-        'KDD2010-algebra2006_2007',
+        'Amazon_Grocery_and_Gourmet_Food',
+        'book-crossing',
+        'lastfm',
+        'ModCloth',
+        'pinterest',
+        'RateBeer',
+        'steam',
+        'yelp2022',
+        # 'jester',
+        'Behance',
+        'mind',
+        # 'KDD2010-algebra2006_2007',
         'ml-1m', #movielens
         'Food',
         'Twitch-100k',
-        'DianPing',
+        # 'DianPing',
         'epinions',
         'anime',
-        'douban',
         'RentTheRunway',
         'BeerAdvocate',
         'yahoo-music'
@@ -72,8 +72,8 @@ CONFIG = {
     ],
 
     # RS Algorithms to test
-    'algorithms': ['LightGCN', 'BPR', 'NeuMF'],
-    # 'algorithms': ['FM', 'EASE'],
+    'algorithms': ['LightGCN', 'BPR', 'NeuMF', 'EASE', 'MultiDAE'],
+    # 'algorithms': ['MultiDAE'],
 
     # Sampling rates to test (%)
     'sampling_rates': [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
@@ -171,7 +171,7 @@ def preprocess_data(df, min_r=10, max_n=100000, min_total_ratings=3):
     return df_filtered
 
 
-def preprocess_data_balanced(df, target_interactions=100000, min_r=10, min_total_ratings=3):
+def preprocess_data_balanced(df, target_interactions=100000, min_r=10, min_total_ratings=10):
     """
     Preprocess dataset using balanced sampling that preserves statistical properties.
 
@@ -218,27 +218,46 @@ def preprocess_data_balanced(df, target_interactions=100000, min_r=10, min_total
     n_total_users = df['user_id'].nunique()
     n_total_items = df['item_id'].nunique()
 
-    avg_interactions_per_user = n_total_interactions / n_total_users
-    avg_interactions_per_item = n_total_interactions / n_total_items
     original_density = n_total_interactions / (n_total_users * n_total_items)
 
     print(f"  Original dataset statistics:")
     print(f"    Total interactions: {n_total_interactions:,}")
     print(f"    Total users: {n_total_users:,}")
     print(f"    Total items: {n_total_items:,}")
-    print(f"    Avg interactions per user: {avg_interactions_per_user:.2f}")
-    print(f"    Avg interactions per item: {avg_interactions_per_item:.2f}")
     print(f"    Density: {original_density:.6f}")
+    
+    
+    # =========================================================================
+    # Step 2: Filter for minimums FIRST
+    # =========================================================================
+    user_ratings_count = df['user_id'].value_counts()
+    item_ratings_count = df['item_id'].value_counts()
+
+    min_required = max(min_r, min_total_ratings)
+    eligible_users = user_ratings_count[user_ratings_count >= min_required]
+    eligible_items = item_ratings_count[item_ratings_count >= min_r]
+
+    # Filter to eligible users/items
+    df = df[
+        df['user_id'].isin(eligible_users.index) & 
+        df['item_id'].isin(eligible_items.index)
+    ]
 
     # =========================================================================
-    # Step 2: Infer target numbers of users and items
+    # Step 3: Infer target numbers of users and items
     # =========================================================================
     # Given target_interactions, solve for n_users and n_items such that:
     # - target_interactions / n_users ≈ avg_interactions_per_user
     # - target_interactions / n_items ≈ avg_interactions_per_item
     # - target_interactions / (n_users * n_items) ≈ original_density
 
-    # From the first two equations:
+    n_total_interactions = len(df)
+    n_total_users = df['user_id'].nunique()
+    n_total_items = df['item_id'].nunique()
+
+    avg_interactions_per_user = n_total_interactions / n_total_users
+    avg_interactions_per_item = n_total_interactions / n_total_items
+  
     target_n_users = int(target_interactions / avg_interactions_per_user)
     target_n_items = int(target_interactions / avg_interactions_per_item)
 
@@ -254,14 +273,8 @@ def preprocess_data_balanced(df, target_interactions=100000, min_r=10, min_total
     print(f"    Density ratio (new/original): {density_ratio:.2f}")
 
     # =========================================================================
-    # Step 3: Select active users
+    # Step 4: Select active users
     # =========================================================================
-    # Rank users by number of interactions
-    user_ratings_count = df['user_id'].value_counts()
-
-    # Only consider users with at least minimum interactions
-    min_required = max(min_r, min_total_ratings)
-    eligible_users = user_ratings_count[user_ratings_count >= min_required]
 
     # Select most active users up to target
     n_users_to_select = min(target_n_users, len(eligible_users))
@@ -273,7 +286,7 @@ def preprocess_data_balanced(df, target_interactions=100000, min_r=10, min_total
     df_users = df[df['user_id'].isin(selected_users)]
 
     # =========================================================================
-    # Step 4: Select popular items among selected users
+    # Step 5: Select popular items among selected users
     # =========================================================================
     # Rank items by popularity in the selected user interactions
     item_ratings_count = df_users['item_id'].value_counts()
@@ -538,14 +551,14 @@ def train_model_with_fixed_test(train_df, global_test_df, model_type='BPR', conf
 
         # Use exact split ratios for train/test
         'eval_args': {
-            'split': {'RS': [n_train, 0, n_test]},
+            'split': {'RS': [int(n_train*0.9), int(n_train*0.1), n_test]},
             'mode': 'full',
-            'order': 'RO'  # Respect order (train first, then test)
+            'order': 'TO'  # Temporal order (train first, then test)
         },
 
         # Filter users to ensure negative sampling is possible
         # Users who have interacted with too many items can't have negative samples
-        'user_inter_num_interval': f"[0,{max_user_interactions}]",
+        'user_inter_num_interval': f"[0,{max_user_interactions}]",   
 
         # Performance settings
         'epochs': 20,
@@ -613,7 +626,7 @@ def evaluate_model(model, config, trainer, test_data_loader, k=10):
 
     Returns:
     --------
-    tuple : (precision, ndcg, map_at_k)
+    tuple : (precision, ndcg, mrr, recall)
     """
 
     result = trainer.evaluate(
@@ -634,9 +647,10 @@ def evaluate_model(model, config, trainer, test_data_loader, k=10):
 
     precision = result.get(f'precision@{available_k}', 0.0)
     ndcg = result.get(f'ndcg@{available_k}', 0.0)
-    map_k = result.get(f'map@{available_k}', 0.0)
+    mrr = result.get(f'mrr@{available_k}', 0.0)
+    recall = result.get(f'recall@{available_k}', 0.0)
 
-    return precision, ndcg, map_k
+    return precision, ndcg, mrr,recall
 
 
 
@@ -870,7 +884,8 @@ def run_single_experiment(train_sample_df, global_test_df, algorithm, strategy,
                 'strategy': strategy,
                 'precision': 0.0,
                 'ndcg': 0.0,
-                'map': 0.0,
+                'mrr': 0.0,
+                'recall': 0.0,
                 'n_ratings': n_ratings,
                 'status': 'no_test_data'
             }
@@ -881,7 +896,7 @@ def run_single_experiment(train_sample_df, global_test_df, algorithm, strategy,
         )
 
         # Evaluate
-        precision, ndcg, map_score = evaluate_model(
+        precision, ndcg, mrr, recall = evaluate_model(
             model, config, trainer, test_data, k=CONFIG['eval_k']
         )
 
@@ -889,13 +904,16 @@ def run_single_experiment(train_sample_df, global_test_df, algorithm, strategy,
         del model, trainer
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        gc.collect()
 
         return {
             'sampling_rate': sampling_rate,
             'strategy': strategy,
             'precision': precision,
             'ndcg': ndcg,
-            'map': map_score,
+            'mrr': mrr,
+            'recall': recall,
             'n_ratings': n_ratings,
             'status': 'success'
         }
@@ -909,7 +927,8 @@ def run_single_experiment(train_sample_df, global_test_df, algorithm, strategy,
             'strategy': strategy,
             'precision': 0.0,
             'ndcg': 0.0,
-            'map': 0.0,
+            'mrr': 0.0,
+            'recall': 0.0,
             'n_ratings': n_ratings,
             'status': 'failed',
             'error': str(e)
@@ -948,7 +967,9 @@ def stratified_per_user_sample(global_train_df, per_user_difficulty,
         n_user_ratings = user_data['n_ratings']
 
         # Guarantee at least 1 rating per user
-        n_samples = max(1, int(n_user_ratings * sampling_rate / 100))
+        n_samples = int(n_user_ratings * sampling_rate / 100)
+        if n_samples == 0:
+            continue  # Skip this user
 
         # Get indices based on strategy
         if strategy == 'difficult':
@@ -966,12 +987,12 @@ def stratified_per_user_sample(global_train_df, per_user_difficulty,
         else:
             raise ValueError(f"Unknown strategy: {strategy}")
 
-        # Handle edge case: user has no difficulty scores computed
-        if len(available_indices) == 0:
-            # Fallback: randomly sample from user's actual ratings
-            user_mask = global_train_df['user_id'] == user_id
-            user_all_indices = global_train_df[user_mask].index.to_numpy()
-            available_indices = np.random.permutation(user_all_indices)
+        # # Handle edge case: user has no difficulty scores computed
+        # if len(available_indices) == 0:
+        #     # Fallback: randomly sample from user's actual ratings
+        #     user_mask = global_train_df['user_id'] == user_id
+        #     user_all_indices = global_train_df[user_mask].index.to_numpy()
+        #     available_indices = np.random.permutation(user_all_indices)
 
         # Take top n_samples indices for this user (limit to available)
         n_samples = min(n_samples, len(available_indices))
@@ -1116,7 +1137,8 @@ def calculate_rpa(results_df):
     # Add RPA columns
     results_df['precision_rpa'] = 0.0
     results_df['ndcg_rpa'] = 0.0
-    results_df['map_rpa'] = 0.0
+    results_df['mrr_rpa'] = 0.0
+    results_df['recall_rpa'] = 0.0
 
     # Calculate RPA for each dataset + algorithm + strategy combination
     for (dataset, algorithm, strategy), group in results_df.groupby(['dataset', 'algorithm', 'strategy']):
@@ -1127,15 +1149,18 @@ def calculate_rpa(results_df):
 
         baseline_precision = baseline['precision'].values[0]
         baseline_ndcg = baseline['ndcg'].values[0]
-        baseline_map = baseline['map'].values[0]
+        baseline_mrr = baseline['mrr'].values[0]
+        baseline_recall = baseline['recall'].values[0]
 
         # Avoid division by zero
         if baseline_precision == 0:
             baseline_precision = 1e-10
         if baseline_ndcg == 0:
             baseline_ndcg = 1e-10
-        if baseline_map == 0:
-            baseline_map = 1e-10
+        if baseline_mrr == 0:
+            baseline_mrr = 1e-10
+        if baseline_recall == 0:
+            baseline_recall = 1e-10
 
         # Calculate RPA for each sampling rate
         mask = ((results_df['dataset'] == dataset) &
@@ -1148,8 +1173,11 @@ def calculate_rpa(results_df):
         results_df.loc[mask, 'ndcg_rpa'] = (
             (results_df.loc[mask, 'ndcg'] - baseline_ndcg) / baseline_ndcg * 100
         )
-        results_df.loc[mask, 'map_rpa'] = (
-            (results_df.loc[mask, 'map'] - baseline_map) / baseline_map * 100
+        results_df.loc[mask, 'mrr_rpa'] = (
+            (results_df.loc[mask, 'mrr'] - baseline_mrr) / baseline_mrr * 100
+        )
+        results_df.loc[mask, 'recall_rpa'] = (
+            (results_df.loc[mask, 'recall'] - baseline_recall) / baseline_recall * 100
         )
 
     return results_df
@@ -1161,7 +1189,7 @@ def calculate_rpa(results_df):
 
 def plot_metrics(results_df, dataset_name, algorithm):
     """
-    Generate standard metric plots (Precision, NDCG, MAP).
+    Generate standard metric plots (Precision, NDCG, MRR, Recall).
 
     Parameters:
     -----------
@@ -1172,7 +1200,7 @@ def plot_metrics(results_df, dataset_name, algorithm):
     algorithm : str
         RS algorithm name
     """
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
 
     # Color scheme
     color_difficult = '#E63946'
@@ -1229,25 +1257,46 @@ def plot_metrics(results_df, dataset_name, algorithm):
     axes[1].legend(fontsize=11, loc='best')
     axes[1].set_xticks(CONFIG['sampling_rates'])
 
-    # Plot 3: MAP
-    axes[2].plot(difficult_data['sampling_rate'], difficult_data['map'],
+    # Plot 3: MRR
+    axes[2].plot(difficult_data['sampling_rate'], difficult_data['mrr'],
                  marker='o', linewidth=2.5, markersize=8,
                  color=color_difficult, label='Difficult', linestyle='-')
-    axes[2].plot(random_data['sampling_rate'], random_data['map'],
+    axes[2].plot(random_data['sampling_rate'], random_data['mrr'],
                  marker='s', linewidth=2.5, markersize=8,
                  color=color_random, label='Random', linestyle='--')
-    axes[2].plot(easy_data['sampling_rate'], easy_data['map'],
+    axes[2].plot(easy_data['sampling_rate'], easy_data['mrr'],
                  marker='^', linewidth=2.5, markersize=8,
                  color=color_easy, label='Easiest', linestyle=':')
-    axes[2].plot(temporal_data['sampling_rate'], temporal_data['map'],
+    axes[2].plot(temporal_data['sampling_rate'], temporal_data['mrr'],
                  marker='D', linewidth=2.5, markersize=8,
                  color=color_temporal, label='Temporal', linestyle='-.')
     axes[2].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
-    axes[2].set_ylabel(f'MAP@{CONFIG["eval_k"]}', fontsize=12, fontweight='bold')
-    axes[2].set_title(f'MAP@{CONFIG["eval_k"]}', fontsize=14, fontweight='bold')
+    axes[2].set_ylabel(f'MRR@{CONFIG["eval_k"]}', fontsize=12, fontweight='bold')
+    axes[2].set_title(f'MRR@{CONFIG["eval_k"]}', fontsize=14, fontweight='bold')
     axes[2].grid(True, alpha=0.3, linestyle='--')
     axes[2].legend(fontsize=11, loc='best')
     axes[2].set_xticks(CONFIG['sampling_rates'])
+    
+    # Plot 4: Recall
+    axes[3].plot(difficult_data['sampling_rate'], difficult_data['recall'],
+                 marker='o', linewidth=2.5, markersize=8,
+                 color=color_difficult, label='Difficult', linestyle='-')
+    axes[3].plot(random_data['sampling_rate'], random_data['recall'],
+                 marker='s', linewidth=2.5, markersize=8,
+                 color=color_random, label='Random', linestyle='--')
+    axes[3].plot(easy_data['sampling_rate'], easy_data['recall'],
+                 marker='^', linewidth=2.5, markersize=8,
+                 color=color_easy, label='Easiest', linestyle=':')
+    axes[3].plot(temporal_data['sampling_rate'], temporal_data['recall'],
+                 marker='D', linewidth=2.5, markersize=8,
+                 color=color_temporal, label='Temporal', linestyle='-.')
+    axes[3].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
+    axes[3].set_ylabel(f'Recall@{CONFIG["eval_k"]}', fontsize=12, fontweight='bold')
+    axes[3].set_title(f'Recall@{CONFIG["eval_k"]}', fontsize=14, fontweight='bold')
+    axes[3].grid(True, alpha=0.3, linestyle='--')
+    axes[3].legend(fontsize=11, loc='best')
+    axes[3].set_xticks(CONFIG['sampling_rates'])    
+    
 
     plt.suptitle(f'{dataset_name} - {algorithm}', fontsize=16, fontweight='bold', y=1.02)
     plt.tight_layout()
@@ -1274,7 +1323,7 @@ def plot_rpa(results_df, dataset_name, algorithm):
     algorithm : str
         RS algorithm name
     """
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
 
     # Color scheme
     color_difficult = '#E63946'
@@ -1332,25 +1381,45 @@ def plot_rpa(results_df, dataset_name, algorithm):
     axes[1].grid(True, alpha=0.3, linestyle='--')
     axes[1].legend(fontsize=11, loc='best')
 
-    # Plot 3: MAP RPA
-    axes[2].plot(difficult_data['sampling_rate'], difficult_data['map_rpa'],
+    # Plot 3: MRR RPA
+    axes[2].plot(difficult_data['sampling_rate'], difficult_data['mrr_rpa'],
                  marker='o', linewidth=2.5, markersize=8,
                  color=color_difficult, label='Difficult', linestyle='-')
-    axes[2].plot(random_data['sampling_rate'], random_data['map_rpa'],
+    axes[2].plot(random_data['sampling_rate'], random_data['mrr_rpa'],
                  marker='s', linewidth=2.5, markersize=8,
                  color=color_random, label='Random', linestyle='--')
-    axes[2].plot(easy_data['sampling_rate'], easy_data['map_rpa'],
+    axes[2].plot(easy_data['sampling_rate'], easy_data['mrr_rpa'],
                  marker='^', linewidth=2.5, markersize=8,
                  color=color_easy, label='Easiest', linestyle=':')
-    axes[2].plot(temporal_data['sampling_rate'], temporal_data['map_rpa'],
+    axes[2].plot(temporal_data['sampling_rate'], temporal_data['mrr_rpa'],
                  marker='D', linewidth=2.5, markersize=8,
                  color=color_temporal, label='Temporal', linestyle='-.')
     axes[2].axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
     axes[2].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
     axes[2].set_ylabel('RPA (%)', fontsize=12, fontweight='bold')
-    axes[2].set_title(f'MAP@{CONFIG["eval_k"]} RPA', fontsize=14, fontweight='bold')
+    axes[2].set_title(f'MRR@{CONFIG["eval_k"]} RPA', fontsize=14, fontweight='bold')
     axes[2].grid(True, alpha=0.3, linestyle='--')
     axes[2].legend(fontsize=11, loc='best')
+    
+    # Plot 4: Recall RPA
+    axes[3].plot(difficult_data['sampling_rate'], difficult_data['recall_rpa'],
+                 marker='o', linewidth=2.5, markersize=8,
+                 color=color_difficult, label='Difficult', linestyle='-')
+    axes[3].plot(random_data['sampling_rate'], random_data['recall_rpa'],
+                 marker='s', linewidth=2.5, markersize=8,
+                 color=color_random, label='Random', linestyle='--')
+    axes[3].plot(easy_data['sampling_rate'], easy_data['recall_rpa'],
+                 marker='^', linewidth=2.5, markersize=8,
+                 color=color_easy, label='Easiest', linestyle=':')
+    axes[3].plot(temporal_data['sampling_rate'], temporal_data['recall_rpa'],
+                 marker='D', linewidth=2.5, markersize=8,
+                 color=color_temporal, label='Temporal', linestyle='-.')
+    axes[3].axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+    axes[3].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
+    axes[3].set_ylabel('RPA (%)', fontsize=12, fontweight='bold')
+    axes[3].set_title(f'Recall@{CONFIG["eval_k"]} RPA', fontsize=14, fontweight='bold')
+    axes[3].grid(True, alpha=0.3, linestyle='--')
+    axes[3].legend(fontsize=11, loc='best')
 
     plt.suptitle(f'{dataset_name} - {algorithm} - Relative Performance Analysis',
                  fontsize=16, fontweight='bold', y=1.02)
@@ -1389,7 +1458,7 @@ def plot_aggregated_comparison(results_df):
         algo_data = results_df[results_df['algorithm'] == algorithm]
 
         # Plot 1: Average RPA across datasets for each strategy
-        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        fig, axes = plt.subplots(1, 4, figsize=(20, 5))
 
         # Exclude 100% sampling rate
         data = algo_data[algo_data['sampling_rate'] != 100]
@@ -1398,7 +1467,8 @@ def plot_aggregated_comparison(results_df):
         avg_rpa = data.groupby(['strategy', 'sampling_rate']).agg({
             'precision_rpa': 'mean',
             'ndcg_rpa': 'mean',
-            'map_rpa': 'mean'
+            'mrr_rpa': 'mean',
+            'recall_rpa': 'mean'
         }).reset_index()
 
         difficult_avg = avg_rpa[avg_rpa['strategy'] == 'difficult'].sort_values('sampling_rate')
@@ -1439,22 +1509,38 @@ def plot_aggregated_comparison(results_df):
         axes[1].grid(True, alpha=0.3, linestyle='--')
         axes[1].legend(fontsize=11, loc='best')
 
-        # MAP RPA
-        axes[2].plot(difficult_avg['sampling_rate'], difficult_avg['map_rpa'],
+        # MRR RPA
+        axes[2].plot(difficult_avg['sampling_rate'], difficult_avg['mrr_rpa'],
                      marker='o', linewidth=2.5, markersize=8,
                      color=color_difficult, label='Difficult', linestyle='-')
-        axes[2].plot(random_avg['sampling_rate'], random_avg['map_rpa'],
+        axes[2].plot(random_avg['sampling_rate'], random_avg['mrr_rpa'],
                      marker='s', linewidth=2.5, markersize=8,
                      color=color_random, label='Random', linestyle='--')
-        axes[2].plot(easy_avg['sampling_rate'], easy_avg['map_rpa'],
+        axes[2].plot(easy_avg['sampling_rate'], easy_avg['mrr_rpa'],
                      marker='^', linewidth=2.5, markersize=8,
                      color=color_easy, label='Easiest', linestyle=':')
         axes[2].axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
         axes[2].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
         axes[2].set_ylabel('Average RPA (%)', fontsize=12, fontweight='bold')
-        axes[2].set_title(f'MAP@{CONFIG["eval_k"]} - Average RPA', fontsize=14, fontweight='bold')
+        axes[2].set_title(f'MRR@{CONFIG["eval_k"]} - Average RPA', fontsize=14, fontweight='bold')
         axes[2].grid(True, alpha=0.3, linestyle='--')
         axes[2].legend(fontsize=11, loc='best')
+
+        axes[3].plot(difficult_avg['sampling_rate'], difficult_avg['recall_rpa'],
+                     marker='o', linewidth=2.5, markersize=8,
+                     color=color_difficult, label='Difficult', linestyle='-')
+        axes[3].plot(random_avg['sampling_rate'], random_avg['recall_rpa'],
+                     marker='s', linewidth=2.5, markersize=8,
+                     color=color_random, label='Random', linestyle='--')
+        axes[3].plot(easy_avg['sampling_rate'], easy_avg['recall_rpa'],
+                     marker='^', linewidth=2.5, markersize=8,
+                     color=color_easy, label='Easiest', linestyle=':')
+        axes[3].axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+        axes[3].set_xlabel('Sampling Rate (%)', fontsize=12, fontweight='bold')
+        axes[3].set_ylabel(f'Recall@{CONFIG["eval_k"]}', fontsize=12, fontweight='bold')
+        axes[3].set_title(f'Recall@{CONFIG["eval_k"]} - Average RPA', fontsize=14, fontweight='bold')
+        axes[3].grid(True, alpha=0.3, linestyle='--')
+        axes[3].legend(fontsize=11, loc='best')
 
         plt.suptitle(f'{algorithm} - Average RPA Across All Datasets',
                      fontsize=16, fontweight='bold', y=1.02)
@@ -1467,43 +1553,6 @@ def plot_aggregated_comparison(results_df):
 
         print(f"    Saved aggregated RPA plot: {filepath}")
 
-    # Plot 2: Heatmap showing best strategy at 50% sampling
-    # Filter for 50% sampling
-    data_50 = results_df[results_df['sampling_rate'] == 50]
-
-    # Only create heatmap if we have data at 50% sampling
-    if len(data_50) > 0:
-        fig, ax = plt.subplots(figsize=(12, 6))
-
-        # Pivot for heatmap (NDCG as metric)
-        heatmap_data = data_50.pivot_table(
-            index='dataset',
-            columns='algorithm',
-            values='ndcg',
-            aggfunc='max'
-        )
-
-        # Check if heatmap_data is not empty
-        if not heatmap_data.empty and heatmap_data.size > 0:
-            sns.heatmap(heatmap_data, annot=True, fmt='.4f', cmap='YlOrRd',
-                        ax=ax, cbar_kws={'label': f'NDCG@{CONFIG["eval_k"]}'})
-            ax.set_title(f'Best NDCG@{CONFIG["eval_k"]} at 50% Sampling (by Dataset × Algorithm)',
-                         fontsize=14, fontweight='bold')
-            ax.set_xlabel('Algorithm', fontsize=12, fontweight='bold')
-            ax.set_ylabel('Dataset', fontsize=12, fontweight='bold')
-
-            plt.tight_layout()
-
-            filepath = os.path.join(CONFIG['plots_dir'], 'heatmap_50pct_sampling.png')
-            plt.savefig(filepath, dpi=300, bbox_inches='tight')
-            plt.close()
-
-            print(f"  Saved heatmap plot: {filepath}")
-        else:
-            print(f"  Skipping heatmap (no valid data at 50% sampling)")
-            plt.close()
-    else:
-        print(f"  Skipping heatmap (no experiments at 50% sampling rate)")
 
 
 # =============================================================================
@@ -1602,6 +1651,7 @@ def load_inter_file(dataset_name, data_path='dataset/'):
         'song_id': 'item_id',      # music datasets
         'student_id': 'user_id',   # educational datasets (KDD2010, etc.)
         'problem_hierarchy': 'item_id',  # educational datasets (KDD2010)
+        'anonymous_user_id': 'user_id',  # yahoo-music
     }
 
     for old_name, new_name in column_mappings.items():
@@ -1771,7 +1821,8 @@ def main():
                         row = strat_data.iloc[0]
                         print(f"  {strategy:20s}: P@{CONFIG['eval_k']}={row['precision']:.4f}, "
                               f"NDCG@{CONFIG['eval_k']}={row['ndcg']:.4f}, "
-                              f"MAP@{CONFIG['eval_k']}={row['map']:.4f}")
+                              f"MRR@{CONFIG['eval_k']}={row['mrr']:.4f}, "
+                              f", Recall@{CONFIG['eval_k']}={row['recall']:.4f}")
                 print()
 
 
