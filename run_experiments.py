@@ -82,7 +82,7 @@ CONFIG = {
     'strategies': ['difficult', 'random', 'difficult_inverse', 'temporal'],
 
     # Experiment parameters
-    'min_ratings': 10,        # Minimum ratings per user/item
+    'min_ratings': 5,        # Minimum ratings per user/item
     'min_total_ratings_per_user': 11,  # Minimum total interactions per user (for stratified sampling)
     'max_users': 100000,     # Maximum users to keep
     'max_items': 100000,     # Maximum items to keep
@@ -562,10 +562,7 @@ def train_model_with_fixed_test(train_df, global_test_df, model_type='BPR', conf
             'mode': 'full',
             'order': 'TO'  # Temporal order (train first, then test)
         },
-
-        # Filter users to ensure negative sampling is possible
-        # Users who have interacted with too many items can't have negative samples
-        'user_inter_num_interval': f"[0,{max_user_interactions}]",   
+  
 
         # Performance settings
         'epochs': 20,
