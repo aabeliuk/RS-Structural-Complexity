@@ -562,7 +562,6 @@ def train_model_with_fixed_test(train_df, global_test_df, model_type='BPR', conf
             'mode': 'full',
             'order': 'TO'  # Temporal order (train first, then test)
         },
-  
 
         # Performance settings
         'epochs': 20,
@@ -1682,6 +1681,13 @@ def load_inter_file(dataset_name, data_path='dataset/'):
 
     # Ensure rating is numeric
     df['rating'] = pd.to_numeric(df['rating'], errors='coerce')
+
+    # Remove rows with NaN or infinite ratings (prevents SVD failures)
+    n_before = len(df)
+    df = df[df['rating'].notna() & np.isfinite(df['rating'])]
+    n_removed = n_before - len(df)
+    if n_removed > 0:
+        print(f"  Removed {n_removed:,} rows with NaN/infinite ratings")
 
     # Ensure we have all required columns
     required_cols = ['user_id', 'item_id', 'rating', 'timestamp']
