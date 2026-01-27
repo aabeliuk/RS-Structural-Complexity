@@ -558,7 +558,7 @@ def train_model_with_fixed_test(train_df, global_test_df, model_type='BPR', conf
 
         # Use exact split ratios for train/test
         'eval_args': {
-            'split': {'RS': [int(n_train*0.9), int(n_train*0.1), n_test]},
+            'split': {'RS': [n_train, 0, n_test]},
             'mode': 'full',
             'order': 'TO'  # Temporal order (train first, then test)
         },
