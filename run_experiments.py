@@ -6,7 +6,6 @@ This script runs comprehensive experiments comparing different sampling techniqu
 It computes Relative Performance Analysis (RPA) to measure performance loss/gain
 compared to 100% sampling baseline.
 
-Author: Generated with Claude Code
 Date: 2025-12-11
 """
 

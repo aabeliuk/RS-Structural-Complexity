@@ -48,7 +48,6 @@ print(f"Normalized RMSE: {rmse/rmse_svd:.4f}")
 - **example_usage.py** - Example script showing how to use the module
 - **predictability.ipynb** - Original notebook implementation
 - **predictability_results.ipynb** - Results analysis and visualization
-- **CLAUDE.md** - Detailed architecture documentation for AI assistants
 
 ## Key Concepts
 
