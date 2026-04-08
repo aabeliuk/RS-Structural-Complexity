@@ -57,16 +57,22 @@ CONFIG = {
         # 'jester',
         'Behance',
         'mind',
-        # 'KDD2010-algebra2006_2007',
         'ml-1m', #movielens
         'Food',
         'Twitch-100k',
-        # 'DianPing',
         'epinions',
         'anime',
         'RentTheRunway',
         'BeerAdvocate',
-        'yahoo-music'
+        'yahoo-music',
+        # 'DianPing',
+        # 'KDD2010-algebra2006_2007',
+        'Amazon_Books',
+        'Amazon_Movies_and_TV',
+        # 'Amazon_Digital_Music',
+        'GoodReads',
+        'douban',
+        'netflix'
         
     ],
 
