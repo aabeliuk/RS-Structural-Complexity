@@ -13,6 +13,58 @@ from sklearn.metrics import mean_squared_error
 import time
 
 
+# ---------------------------------------------------------------------------
+# Baselines
+# ---------------------------------------------------------------------------
+
+def sparsity(R):
+    """
+    R: scipy sparse matrix or dense numpy array
+    returns sparsity in [0,1]
+    """
+    if hasattr(R, "nnz"):  # sparse matrix
+        nnz = R.nnz
+    else:
+        nnz = np.count_nonzero(R)
+
+    total = R.shape[0] * R.shape[1]
+    return 1.0 - (nnz / total)
+
+
+def effective_rank(R, k=100):
+    """
+    Effective rank using top-k singular values.
+
+    Based on Roy & Vetterli (2007): erank(X) = exp(H(σ))
+
+    Parameters
+    ----------
+    R : scipy sparse matrix
+    k : int
+        Number of singular values
+
+    Returns
+    -------
+    erank : float
+    """
+    k = min(k, min(R.shape) - 1)
+
+    # svds returns ascending order
+    _, s, _ = svds(R.astype(float), k=k)
+
+    s = np.sort(s)[::-1]
+
+    p = s / np.sum(s)
+
+    entropy = -np.sum(p * np.log(p + 1e-12))
+
+    erank = np.exp(entropy)
+
+    return erank
+
+
+# ---------------------------------------------------------------------------
+
 def sample_zero_forever(mat):
     """
     Generator to yield random zero indices from a sparse matrix.
